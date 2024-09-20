@@ -63,7 +63,7 @@ async def chat(f_req):
             if b_res.status != 200:
                 return aiohttp.web.Response(status=b_res.status)
 
-            async for chunk in b_res.content:
+            async for chunk, _ in b_res.content.iter_chunks():
                 await f_res.write(chunk)
 
         await f_res.write_eof()
