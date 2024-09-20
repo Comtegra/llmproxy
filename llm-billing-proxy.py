@@ -50,16 +50,20 @@ async def chat(f_req):
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     f_res = aiohttp.web.StreamResponse()
-    await f_res.prepare(f_req)
 
-    async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
-        if b_res.status != 200:
-            return aiohttp.web.Response(status=b_res.status)
+    try:
+        await f_res.prepare(f_req)
 
-        async for chunk in b_res.content:
-            await f_res.write(chunk)
+        async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
+            if b_res.status != 200:
+                return aiohttp.web.Response(status=b_res.status)
 
-    await f_res.write_eof()
+            async for chunk in b_res.content:
+                await f_res.write(chunk)
+
+        await f_res.write_eof()
+    except OSError as e:
+        logger.info("Client disconnected")
 
     return f_res
 
