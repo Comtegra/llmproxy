@@ -19,8 +19,8 @@ python3 llm-billing-proxy.py
 Then, run a query.
 
 ```sh
-curl -v -H'Content-Type: application/json' \
-    -d'{"messages": [{"role": "system", "content": "You are an assistant."}, {"role": "user", "content": "Write a limerick about python exceptions"}], "model": "llama31-70b"}' \
+curl -v -H'Content-Type: application/json' -H'Authorization: Bearer mykey1' \
+    -d'{"messages": [{"role": "system", "content": "You are an assistant."}, {"role": "user", "content": "Write a limerick about python exceptions"}], "model": "llama31-70b", "stream": true}' \
     'http://localhost:8080/v1/chat/completions'
 ```
 
