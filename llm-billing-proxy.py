@@ -25,6 +25,10 @@ async def client_init(app):
     app["client"] = aiohttp.ClientSession()
 
 
+async def client_finish(app):
+    await app["client"].close()
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @routes.post("/v1/chat/completions")
@@ -59,5 +63,6 @@ async def chat(f_req):
 if __name__ == "__main__":
     app = aiohttp.web.Application()
     app.on_startup.append(client_init)
+    app.on_cleanup.append(client_finish)
     app.add_routes(routes)
     aiohttp.web.run_app(app)
