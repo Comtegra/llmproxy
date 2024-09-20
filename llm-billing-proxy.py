@@ -25,23 +25,35 @@ async def client_init(app):
     app["client"] = aiohttp.ClientSession()
 
 
+# Frontend related variables are prefixed with f_.
+# Backend related variables are prefixed with b_.
 @routes.post("/v1/chat/completions")
-async def chat(req):
-    body = await req.json()
+async def chat(f_req):
+    app = f_req.app
+
+    f_body = await f_req.json()
 
     try:
-        backend = BACKENDS[body["model"]]
+        b_cfg = BACKENDS[f_body["model"]]
     except KeyError:
         return aiohttp.web.Response(status=400)
 
-    url = backend["url"] / str(req.rel_url)[1:]
-    headers = {"Authorization": "Bearer %s" % backend["token"]}
+    b_url = b_cfg["url"] / str(f_req.rel_url)[1:]
+    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
-    async with req.app["client"].post(url, headers=headers, json=body) as res:
-        if res.status != 200:
-            return aiohttp.web.Response(status=res.status)
+    f_res = aiohttp.web.StreamResponse()
+    await f_res.prepare(f_req)
 
-        return aiohttp.web.json_response(await res.json())
+    async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
+        if b_res.status != 200:
+            return aiohttp.web.Response(status=b_res.status)
+
+        async for chunk in b_res.content:
+            await f_res.write(chunk)
+
+    await f_res.write_eof()
+
+    return f_res
 
 
 if __name__ == "__main__":
