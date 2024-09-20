@@ -1,3 +1,5 @@
+import logging
+
 import aiohttp.web
 import yarl
 
@@ -17,6 +19,8 @@ BACKENDS = {
         "token": "MY-TOKEN3",
     },
 }
+
+logger = logging.getLogger(__name__)
 
 routes = aiohttp.web.RouteTableDef()
 
@@ -61,8 +65,11 @@ async def chat(f_req):
 
 
 if __name__ == "__main__":
+    log_fmt = "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(format=log_fmt, level="INFO")
+
     app = aiohttp.web.Application()
     app.on_startup.append(client_init)
     app.on_cleanup.append(client_finish)
     app.add_routes(routes)
-    aiohttp.web.run_app(app)
+    aiohttp.web.run_app(app, access_log=None)
