@@ -19,6 +19,7 @@ BACKENDS = {
         "token": "MY-TOKEN3",
     },
 }
+API_KEYS = ["mykey1"]
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ async def client_finish(app):
 @routes.post("/v1/chat/completions")
 async def chat(f_req):
     app = f_req.app
+
+    scheme, _, token = f_req.headers.get("Authorization", "").partition(" ")
+    if scheme != "Bearer" or token not in API_KEYS:
+        return aiohttp.web.Response(status=401)
 
     f_body = await f_req.json()
 
