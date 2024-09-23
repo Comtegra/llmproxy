@@ -10,7 +10,7 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 ## Development
 
-Edit `llm-billing-proxy.py` and configure `BACKENDS`, then run the proxy.
+Edit `config.toml` and configure backends, then run the proxy.
 
 ```sh
 python3 llm-billing-proxy.py

@@ -1,37 +1,24 @@
 import json
 import logging
+import tomllib
 
 import aiohttp.web
 import yarl
 
-
-# TODO: config file
-BACKENDS = {
-    "llama31-70b": {
-        "url": yarl.URL("https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"),
-        "token": "MY-TOKEN1",
-    },
-    "llama3-sqlcoder-8b": {
-        "url": yarl.URL("https://llm-server2.comtegra.cgc-waw-01.comtegra.cloud"),
-        "token": "MY-TOKEN2",
-    },
-    "llama31-8b": {
-        "url": yarl.URL("https://llm-server-bis.comtegra.cgc-waw-01.comtegra.cloud"),
-        "token": "MY-TOKEN3",
-    },
-}
-API_KEYS = ["mykey1"]
 
 logger = logging.getLogger(__name__)
 
 routes = aiohttp.web.RouteTableDef()
 
 
-async def client_init(app):
+async def on_startup(app):
+    with open("config.toml", "rb") as f:
+        app["config"] = tomllib.load(f)
+
     app["client"] = aiohttp.ClientSession()
 
 
-async def client_finish(app):
+async def on_cleanup(app):
     await app["client"].close()
 
 
@@ -82,7 +69,7 @@ async def chat(f_req):
     app = f_req.app
 
     scheme, _, token = f_req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer" or token not in API_KEYS:
+    if scheme != "Bearer" or token not in app["config"]["api_keys"]:
         raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
 
     try:
@@ -91,11 +78,11 @@ async def chat(f_req):
         raise aiohttp.web.HTTPBadRequest(body="JSON decode error: %s" % e)
 
     try:
-        b_cfg = BACKENDS[f_body["model"]]
+        b_cfg = app["config"]["backends"][f_body["model"]]
     except KeyError:
         raise aiohttp.web.HTTPUnauthorized(body="Incorrect model")
 
-    b_url = b_cfg["url"] / str(f_req.rel_url)[1:]
+    b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
@@ -118,7 +105,7 @@ if __name__ == "__main__":
     logging.basicConfig(format=log_fmt, level="INFO")
 
     app = aiohttp.web.Application()
-    app.on_startup.append(client_init)
-    app.on_cleanup.append(client_finish)
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     app.add_routes(routes)
     aiohttp.web.run_app(app, access_log=None)

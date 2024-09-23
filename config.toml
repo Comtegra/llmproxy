@@ -1,0 +1,13 @@
+api_keys = ["mykey1"]  # TODO: api keys from mongo
+
+[backends.llama31-70b]
+url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
+token = "MY-TOKEN1"
+
+[backends.llama3-sqlcoder-8b]
+url = "https://llm-server2.comtegra.cgc-waw-01.comtegra.cloud"
+token = "MY-TOKEN2"
+
+[backends.llama31-8b]
+url = "https://llm-server-bis.comtegra.cgc-waw-01.comtegra.cloud"
+token = "MY-TOKEN3"
