@@ -5,16 +5,12 @@ import tomllib
 import aiohttp.web
 import yarl
 
-
 logger = logging.getLogger(__name__)
 
 routes = aiohttp.web.RouteTableDef()
 
 
 async def on_startup(app):
-    with open("config.toml", "rb") as f:
-        app["config"] = tomllib.load(f)
-
     timeout = aiohttp.ClientTimeout(connect=app["config"]["timeout_connect"])
     app["client"] = aiohttp.ClientSession(timeout=timeout)
 
@@ -106,10 +102,14 @@ async def chat(f_req):
 
 
 if __name__ == "__main__":
-    log_fmt = "%(asctime)s %(levelname)s %(message)s"
-    logging.basicConfig(format=log_fmt, level="INFO")
-
     app = aiohttp.web.Application()
+
+    with open("config.toml", "rb") as f:
+        app["config"] = tomllib.load(f)
+
+    log_fmt = "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(format=log_fmt, level=app["config"]["log_level"])
+
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.add_routes(routes)
