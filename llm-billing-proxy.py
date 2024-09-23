@@ -15,7 +15,8 @@ async def on_startup(app):
     with open("config.toml", "rb") as f:
         app["config"] = tomllib.load(f)
 
-    app["client"] = aiohttp.ClientSession()
+    timeout = aiohttp.ClientTimeout(connect=app["config"]["timeout_connect"])
+    app["client"] = aiohttp.ClientSession(timeout=timeout)
 
 
 async def on_cleanup(app):
@@ -85,19 +86,23 @@ async def chat(f_req):
     b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
-    async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
-        if b_res.status != 200:
-            body = await b_res.content.read()
-            return aiohttp.web.Response(status=b_res.status, body=body)
+    try:
+        async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
+            if b_res.status != 200:
+                body = await b_res.content.read()
+                return aiohttp.web.Response(status=b_res.status, body=body)
 
-        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
-            f_res, usage = await handle_resp_stream(f_req, b_res)
-        else:
-            f_res, usage = await handle_resp(f_req, b_res)
+            if b_res.headers.get("Transfer-Encoding", "") == "chunked":
+                f_res, usage = await handle_resp_stream(f_req, b_res)
+            else:
+                f_res, usage = await handle_resp(f_req, b_res)
 
-        logger.info("Client used: %s", usage)
+            logger.info("Client used: %s", usage)
 
-        return f_res
+            return f_res
+    except aiohttp.ClientConnectionError as e:
+        logger.error("Backend connection error: %s", e)
+        raise aiohttp.web.HTTPServiceUnavailable() from e
 
 
 if __name__ == "__main__":

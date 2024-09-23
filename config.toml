@@ -1,3 +1,4 @@
+timeout_connect = 5
 api_keys = ["mykey1"]  # TODO: api keys from mongo
 
 [backends.llama31-70b]
