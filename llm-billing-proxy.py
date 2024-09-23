@@ -35,6 +35,46 @@ async def client_finish(app):
     await app["client"].close()
 
 
+async def iter_chunks(stream):
+    chunk = bytearray()
+    async for data, end in stream.iter_chunks():
+        chunk += data
+        if end:
+            yield bytes(chunk)
+            chunk.clear()
+
+
+async def handle_resp(f_req, b_res):
+    body = await b_res.content.read()
+    data = json.loads(body)
+    f_res = aiohttp.web.Response(body=body)
+
+    return f_res, data["usage"]
+
+
+async def handle_resp_stream(f_req, b_res):
+    f_res = aiohttp.web.StreamResponse()
+
+    last = {}
+
+    try:
+        await f_res.prepare(f_req)
+        async for chunk in iter_chunks(b_res.content):
+            last = chunk
+            await f_res.write(chunk)
+        await f_res.write_eof()
+    except OSError as e:
+        logger.info("Client disconnected: %s", e)
+
+    async for chunk in iter_chunks(b_res.content):
+        last = chunk
+
+    _, _, body_raw = last.partition(b" ")
+    body = json.loads(body_raw)
+
+    return f_res, body["usage"]
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @routes.post("/v1/chat/completions")
@@ -58,23 +98,19 @@ async def chat(f_req):
     b_url = b_cfg["url"] / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
-    f_res = aiohttp.web.StreamResponse()
+    async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
+        if b_res.status != 200:
+            body = await b_res.content.read()
+            return aiohttp.web.Response(status=b_res.status, body=body)
 
-    try:
-        await f_res.prepare(f_req)
+        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
+            f_res, usage = await handle_resp_stream(f_req, b_res)
+        else:
+            f_res, usage = await handle_resp(f_req, b_res)
 
-        async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
-            if b_res.status != 200:
-                return aiohttp.web.Response(status=b_res.status)
+        logger.info("Client used: %s", usage)
 
-            async for chunk, _ in b_res.content.iter_chunks():
-                await f_res.write(chunk)
-
-        await f_res.write_eof()
-    except OSError as e:
-        logger.info("Client disconnected")
-
-    return f_res
+        return f_res
 
 
 if __name__ == "__main__":
