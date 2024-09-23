@@ -113,4 +113,10 @@ if __name__ == "__main__":
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.add_routes(routes)
-    aiohttp.web.run_app(app, access_log=None)
+
+    aiohttp.web.run_app(
+        app=app,
+        host=app["config"]["host"],
+        port=app["config"]["port"],
+        access_log=None,
+    )

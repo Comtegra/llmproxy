@@ -1,4 +1,6 @@
 log_level = "INFO"
+host = "0.0.0.0"
+port = 8080
 timeout_connect = 5
 api_keys = ["mykey1"]  # TODO: api keys from mongo
 
