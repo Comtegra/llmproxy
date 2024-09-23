@@ -1,3 +1,4 @@
+import json
 import logging
 
 import aiohttp.web
@@ -42,14 +43,17 @@ async def chat(f_req):
 
     scheme, _, token = f_req.headers.get("Authorization", "").partition(" ")
     if scheme != "Bearer" or token not in API_KEYS:
-        return aiohttp.web.Response(status=401)
+        raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
 
-    f_body = await f_req.json()
+    try:
+        f_body = await f_req.json()
+    except json.decoder.JSONDecodeError as e:
+        raise aiohttp.web.HTTPBadRequest(body="JSON decode error: %s" % e)
 
     try:
         b_cfg = BACKENDS[f_body["model"]]
     except KeyError:
-        return aiohttp.web.Response(status=400)
+        raise aiohttp.web.HTTPUnauthorized(body="Incorrect model")
 
     b_url = b_cfg["url"] / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
