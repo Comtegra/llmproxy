@@ -127,5 +127,5 @@ if __name__ == "__main__":
         app=app,
         host=app["config"]["host"],
         port=app["config"]["port"],
-        access_log=None,
+        access_log_format="%a \"%r\" %s %Tfs"
     )
