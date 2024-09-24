@@ -85,8 +85,9 @@ async def chat(f_req):
     try:
         async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
             if b_res.status != 200:
-                body = await b_res.content.read()
-                return aiohttp.web.Response(status=b_res.status, body=body)
+                logger.error("Backend \"%s\" error: %d %s", f_body["model"],
+                    b_res.status, (await b_res.text()))
+                raise aiohttp.web.HTTPBadGateway()
 
             if b_res.headers.get("Transfer-Encoding", "") == "chunked":
                 f_res, usage = await handle_resp_stream(f_req, b_res)
@@ -96,9 +97,17 @@ async def chat(f_req):
             logger.info("Client used: %s", usage)
 
             return f_res
-    except aiohttp.ClientConnectionError as e:
-        logger.error("Backend connection error: %s", e)
-        raise aiohttp.web.HTTPServiceUnavailable() from e
+    except aiohttp.ServerTimeoutError as e:
+        logger.error("Backend timeout: %s", e)
+        raise aiohttp.web.HTTPGatewayTimeout() from e
+    except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
+            aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
+            aiohttp.InvalidURL) as e:
+        logger.error("Backend error: %s", e)
+        raise aiohttp.web.HTTPBadGateway() from e
+    except aiohttp.ClientError as e:
+        logger.error("HTTP client error: %s", e)
+        raise aiohttp.web.HTTPInternalServerError() from e
 
 
 if __name__ == "__main__":
