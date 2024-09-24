@@ -5,8 +5,6 @@ import tomllib
 import aiohttp.web
 import yarl
 
-logger = logging.getLogger(__name__)
-
 routes = aiohttp.web.RouteTableDef()
 
 
@@ -37,6 +35,7 @@ async def handle_resp(f_req, b_res):
 
 
 async def handle_resp_stream(f_req, b_res):
+    app = f_req.app
     f_res = aiohttp.web.StreamResponse()
 
     last = {}
@@ -48,7 +47,7 @@ async def handle_resp_stream(f_req, b_res):
             await f_res.write(chunk)
         await f_res.write_eof()
     except OSError as e:
-        logger.info("Client disconnected: %s", e)
+        app.logger.info("Client disconnected: %s", e)
 
     async for chunk in iter_chunks(b_res.content):
         last = chunk
@@ -85,7 +84,7 @@ async def chat(f_req):
     try:
         async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
             if b_res.status != 200:
-                logger.error("Backend \"%s\" error: %d %s", f_body["model"],
+                app.logger.error("Backend \"%s\" error: %d %s", f_body["model"],
                     b_res.status, (await b_res.text()))
                 raise aiohttp.web.HTTPBadGateway()
 
@@ -94,19 +93,21 @@ async def chat(f_req):
             else:
                 f_res, usage = await handle_resp(f_req, b_res)
 
-            logger.info("Client used: %s", usage)
+            app.logger.info("Client used: P:%d C:%d tokens of %s",
+                usage["prompt_tokens"], usage["completion_tokens"],
+                f_body["model"])
 
             return f_res
     except aiohttp.ServerTimeoutError as e:
-        logger.error("Backend timeout: %s", e)
+        app.logger.error("Backend timeout: %s", e)
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
             aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
             aiohttp.InvalidURL) as e:
-        logger.error("Backend error: %s", e)
+        app.logger.error("Backend error: %s", e)
         raise aiohttp.web.HTTPBadGateway() from e
     except aiohttp.ClientError as e:
-        logger.error("HTTP client error: %s", e)
+        app.logger.error("HTTP client error: %s", e)
         raise aiohttp.web.HTTPInternalServerError() from e
 
 
