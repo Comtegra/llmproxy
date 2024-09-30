@@ -1,8 +1,11 @@
+import argparse
 import asyncio
 import functools
 import json
 import logging
+import pathlib
 import signal
+import sys
 import tomllib
 
 import aiohttp.web
@@ -20,9 +23,9 @@ async def on_cleanup(app):
     await app["client"].close()
 
 
-def reload_config(app):
+def reload_config(app, config_path):
     try:
-        with open("config.toml", "rb") as f:
+        with config_path.open("rb") as f:
             # Only backends are reloaded
             cfg = tomllib.load(f)
             app["config"]["backends"] = cfg["backends"]
@@ -126,17 +129,27 @@ async def chat(f_req):
         raise aiohttp.web.HTTPInternalServerError() from e
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("-c", "--config", type=pathlib.Path, default="config.toml")
+
 if __name__ == "__main__":
+    args = parser.parse_args()
+
     app = aiohttp.web.Application()
 
-    with open("config.toml", "rb") as f:
-        app["config"] = tomllib.load(f)
+    try:
+        with args.config.open("rb") as f:
+            app["config"] = tomllib.load(f)
+    except OSError as e:
+        print("Failed loading config:", e, file=sys.stderr)
+        sys.exit(1)
 
     log_fmt = "%(asctime)s %(levelname)s %(message)s"
     logging.basicConfig(format=log_fmt, level=app["config"]["log_level"])
 
     loop = asyncio.new_event_loop()
-    loop.add_signal_handler(signal.SIGHUP, functools.partial(reload_config, app))
+    loop.add_signal_handler(signal.SIGHUP,
+        functools.partial(reload_config, app, args.config))
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
