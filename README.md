@@ -8,6 +8,19 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 * aiohttp ~= 3.9.3
 
+## Configuration
+
+See [config.toml](config.toml) for an example configuration file.
+The program will update the list of configured backends from the config file
+on SIGHUP.
+
+```sh
+pkill -f -HUP 'python3? .*llm-billing-proxy\.py'
+
+# or in Docker
+docker kill -s=SIGHUP CONTAINER
+```
+
 ## Development
 
 Edit `config.toml` and configure backends, then run the proxy.

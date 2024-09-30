@@ -1,5 +1,8 @@
+import asyncio
+import functools
 import json
 import logging
+import signal
 import tomllib
 
 import aiohttp.web
@@ -15,6 +18,18 @@ async def on_startup(app):
 
 async def on_cleanup(app):
     await app["client"].close()
+
+
+def reload_config(app):
+    try:
+        with open("config.toml", "rb") as f:
+            # Only backends are reloaded
+            cfg = tomllib.load(f)
+            app["config"]["backends"] = cfg["backends"]
+            app.logger.info("Config reloaded. Configured backends: %s",
+                " ".join(app["config"]["backends"]))
+    except OSError as e:
+        app.logger.error("Failed reloading config: %s", e)
 
 
 async def iter_chunks(stream):
@@ -120,6 +135,9 @@ if __name__ == "__main__":
     log_fmt = "%(asctime)s %(levelname)s %(message)s"
     logging.basicConfig(format=log_fmt, level=app["config"]["log_level"])
 
+    loop = asyncio.new_event_loop()
+    loop.add_signal_handler(signal.SIGHUP, functools.partial(reload_config, app))
+
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.add_routes(routes)
@@ -128,5 +146,6 @@ if __name__ == "__main__":
         app=app,
         host=app["config"]["host"],
         port=app["config"]["port"],
-        access_log_format="%a \"%r\" %s %Tfs"
+        access_log_format="%a \"%r\" %s %Tfs",
+        loop=loop,
     )
