@@ -4,8 +4,7 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 ## Requirements
 
-* aiohttp ~= 3.9.3
-* motor ~= 3.5
+* Python packages from [requirements.txt](requirements.txt)
 * Mongo database (CGC-compatible, see section *Database* below)
 
 ## Configuration
