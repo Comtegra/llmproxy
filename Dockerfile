@@ -7,4 +7,4 @@ RUN pip install --break-system-packages -r requirements.txt && rm requirements.t
 
 COPY llm-billing-proxy.py /
 
-CMD python3 llm-billing-proxy.py
+ENTRYPOINT ["python3", "llm-billing-proxy.py"]
