@@ -48,12 +48,23 @@ class Database:
         })
 
 
+async def check_backends(app):
+    for name, cfg in app["config"]["backends"].items():
+        async with app["client"].get(yarl.URL(cfg["url"]) / "health") as res:
+            if res.ok:
+                logging.info("Backend %s ready", name)
+            else:
+                logging.error("Backend %s not ready: %d %s",
+                    name, res.status, res.reason)
+
+
 async def on_startup(app):
     app["db"] = Database(app["config"]["db"])
     await app["db"].check()
 
     timeout = aiohttp.ClientTimeout(connect=app["config"]["timeout_connect"])
     app["client"] = aiohttp.ClientSession(timeout=timeout)
+    await check_backends(app)
 
 
 async def on_cleanup(app):
