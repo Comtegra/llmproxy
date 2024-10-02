@@ -1,0 +1,10 @@
+services:
+  llm-billing-proxy:
+    image: registry.comtegra.pl/comtegra/llm-billing-proxy:latest  # set a specific version here
+    command: "-c /run/secrets/llm-billing-proxy-config.toml"
+    secrets: [llm-billing-proxy-config.toml]
+    ports: [8080:8080]  # set HOST_PORT:CONTAINER_PORT here
+
+secrets:
+  llm-billing-proxy-config.toml:
+    file: ./config.toml  # set the location of your config file here

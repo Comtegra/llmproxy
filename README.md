@@ -20,6 +20,10 @@ pkill -f -HUP 'python3? .*llm-billing-proxy\.py'
 docker kill -s=SIGHUP CONTAINER
 ```
 
+## Deployment
+
+Use [compose.yaml](compose.yaml) as a template.
+
 ## Development
 
 Edit `config.toml` and configure backends.
