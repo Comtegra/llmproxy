@@ -1,6 +1,8 @@
 import argparse
 import asyncio
+import datetime
 import functools
+import hashlib
 import json
 import logging
 import pathlib
@@ -9,12 +11,47 @@ import sys
 import tomllib
 
 import aiohttp.web
+import motor.motor_asyncio
+import pymongo
 import yarl
 
 routes = aiohttp.web.RouteTableDef()
 
 
+class Database:
+    def __init__(self, cfg):
+        self.db = motor.motor_asyncio.AsyncIOMotorClient(cfg["uri"],
+            tz_aware=True, connect=True,
+            server_api=pymongo.server_api.ServerApi('1'))
+
+    def check(self):
+        return self.db.admin.command("ping")
+
+    def get_user(self, api_key):
+        return self.db["cgc"]["api_keys"].find_one({
+            "access_level": "COMPLETION",
+            "secret": hashlib.sha256(api_key.encode()).hexdigest(),
+            "$or": [
+                {"date_expiry": None},
+                {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
+            ],
+        })
+
+    def put_event(self, user, time, model, prompt_n, completion_n):
+        return self.db["billing"]["events_completion"].insert_one({
+            "date_created": time,
+            "user_id": user.get("user_id"),
+            "api_key_id": str(user.get("_id", "")),
+            "model": model,
+            "prompt_n": prompt_n,
+            "completion_n": completion_n,
+        })
+
+
 async def on_startup(app):
+    app["db"] = Database(app["config"]["db"])
+    await app["db"].check()
+
     timeout = aiohttp.ClientTimeout(connect=app["config"]["timeout_connect"])
     app["client"] = aiohttp.ClientSession(timeout=timeout)
 
@@ -83,7 +120,16 @@ async def chat(f_req):
     app = f_req.app
 
     scheme, _, token = f_req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer" or token not in app["config"]["api_keys"]:
+    if scheme != "Bearer":
+        raise aiohttp.web.HTTPUnauthorized(body="Unsupported authorization scheme")
+
+    try:
+        user = await app["db"].get_user(token)
+    except pymongo.errors.PyMongoError as e:
+        app.logger.critical(e)
+        raise aiohttp.web.GracefulExit() from e
+
+    if scheme != "Bearer" or not user:
         raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
 
     try:
@@ -110,6 +156,18 @@ async def chat(f_req):
                 f_res, usage = await handle_resp_stream(f_req, b_res)
             else:
                 f_res, usage = await handle_resp(f_req, b_res)
+
+            try:
+                await app["db"].put_event(
+                    user=user,
+                    time=datetime.datetime.now(datetime.UTC),
+                    model=f_body["model"],
+                    prompt_n=usage["prompt_tokens"],
+                    completion_n=usage["completion_tokens"]
+                )
+            except pymongo.errors.PyMongoError as e:
+                app.logger.critical(e)
+                raise aiohttp.web.GracefulExit() from e
 
             app.logger.info("Client used: P:%d C:%d tokens of %s",
                 usage["prompt_tokens"], usage["completion_tokens"],

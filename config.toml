@@ -2,7 +2,9 @@ log_level = "INFO"
 host = "0.0.0.0"
 port = 8080
 timeout_connect = 5
-api_keys = ["mykey1"]  # TODO: api keys from mongo
+
+[db]
+uri = "mongodb://localhost:27017/?serverSelectionTimeoutMS=2000"
 
 [backends.llama31-70b]
 url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
