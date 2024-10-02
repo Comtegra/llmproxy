@@ -2,8 +2,6 @@
 
 HTTP proxy that sits between end users and LLM servers and bills them per token.
 
-*Work in progress*
-
 ## Requirements
 
 * aiohttp ~= 3.9.3
