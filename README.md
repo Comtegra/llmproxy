@@ -22,25 +22,28 @@ docker kill -s=SIGHUP CONTAINER
 
 ## Deployment
 
-Use [compose.yaml](compose.yaml) as a template.
+The following instructions assume that you already have a Docker compose
+repository and file.
 
-## Development
+1. Create a MongoDB user with the following privileges (see section
+[Database](#database) below for JS snippets):
+  * `{resource: {db: "cgc", collection: "api_keys"}, actions: ["find"]}`
+  * `{resource: {db: "billing", collection: "event_completions"}, actions: ["insert"]}`
+2. Copy [config.toml](config.toml) to your repository. A good relative path
+would be `secrets/llm-billing-proxy-config.toml`.
+3. In the config edit `uri` in section `db` so that it includes credentials for
+the Mongo user (e.g. `mongodb://myuser:mypass@host:27017/?authSource=cgc`).
+4. Add appropriate entries to your compose file's `services` and `secrets`
+sections. There's a template [compose.yml](compose.yml) in this repository.
+5. Bring the new service up and verify it started correctly
+(e.g `docker compose up llm-billing-proxy`).
 
-Edit `config.toml` and configure backends.
+## Testing
 
-Populate a Mongo database with sample API keys.
+A MongoDB shell script for adding sample API keys is available here:
+[sample.js](sample.js)
 
-```sh
-cat sample.js | mongosh
-```
-
-Run the proxy.
-
-```sh
-python3 llm-billing-proxy.py
-```
-
-Then, run a query.
+You may then run a query like this:
 
 ```sh
 curl -v -H'Content-Type: application/json' -H'Authorization: Bearer token2' \
@@ -48,16 +51,43 @@ curl -v -H'Content-Type: application/json' -H'Authorization: Bearer token2' \
     'http://localhost:8080/v1/chat/completions'
 ```
 
-## Docker
-
-```sh
-docker build -t llm-billing-proxy .
-docker run 
-```
 ## Database
 
 This program uses MongoDB for authentication and completion logging.
 The schema is compatible with Comtergra GPU Core.
+The MongoDB user needs the following privileges:
+
+```js
+db.getSiblingDB("cgc").createRole({
+  role: "completionBillingWriter",
+  privileges: [
+    {
+      resource: {db: "cgc", collection: "api_keys"},
+      actions: ["find"],
+    },
+  ],
+  roles: [],
+});
+db.getSiblingDB("billing").createRole({
+  role: "apiKeysReader",
+  privileges: [
+    {
+      resource: {db: "billing", collection: "events_completion"},
+      actions: ["insert"],
+    },
+  ],
+  roles: [],
+});
+
+db.getSiblingDB("cgc").createUser({
+  user: "llm-billing-proxy",
+  pwd: "mypass",
+  roles: [
+    { role: "completionBillingWriter", db: "cgc" },
+    { role: "apiKeysReader", db: "billing" },
+  ],
+});
+```
 
 ## Authentication
 

@@ -4,7 +4,8 @@ services:
     command: "-c /run/secrets/llm-billing-proxy-config.toml"
     secrets: [llm-billing-proxy-config.toml]
     ports: [8080:8080]  # set HOST_PORT:CONTAINER_PORT here
+    #networks: [backend, l3out]  # networks if needed
 
 secrets:
   llm-billing-proxy-config.toml:
-    file: ./config.toml  # set the location of your config file here
+    file: ./secrets/llm-billing-proxy-config.toml  # set the location of your config file here

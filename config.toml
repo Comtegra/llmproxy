@@ -1,10 +1,10 @@
 log_level = "INFO"
 host = "0.0.0.0"
 port = 8080
-timeout_connect = 5
+timeout_connect = 5  # backend connection timeout
 
 [db]
-uri = "mongodb://localhost:27017/?serverSelectionTimeoutMS=2000"
+uri = "mongodb://llm-billing-proxy:mypass@mongohost:27017/?authSource=cgc"
 
 [backends.llama31-70b]
 url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
