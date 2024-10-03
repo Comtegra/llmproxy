@@ -2,6 +2,8 @@ log_level = "INFO"
 host = "0.0.0.0"
 port = 8080
 timeout_connect = 5  # backend connection timeout
+#cert = "example.crt"
+#key = "example.key"
 
 [db]
 uri = "mongodb://llm-billing-proxy:mypass@mongohost:27017/?authSource=cgc"

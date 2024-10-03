@@ -7,6 +7,7 @@ import json
 import logging
 import pathlib
 import signal
+import ssl
 import sys
 import tomllib
 
@@ -224,10 +225,16 @@ if __name__ == "__main__":
     app.on_cleanup.append(on_cleanup)
     app.add_routes(routes)
 
+    ssl_ctx = None
+    if (cert := app["config"].get("cert")) and (key := app["config"].get("key")):
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(cert, key)
+
     aiohttp.web.run_app(
         app=app,
         host=app["config"]["host"],
         port=app["config"]["port"],
+        ssl_context=ssl_ctx,
         access_log_format="%a \"%r\" %s %Tfs",
         loop=loop,
     )
