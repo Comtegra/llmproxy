@@ -2,10 +2,17 @@ services:
   llm-billing-proxy:
     image: registry.comtegra.pl/comtegra/llm-billing-proxy:latest  # set a specific version here
     command: "-c /run/secrets/llm-billing-proxy-config.toml"
-    secrets: [llm-billing-proxy-config.toml]
+    secrets:
+      - llm-billing-proxy-config.toml
+      #- llm-billing-proxy.crt  # TLS cert and key if needed, see also below
+      #- llm-billing-proxy.key
     ports: [8080:8080]  # set HOST_PORT:CONTAINER_PORT here
     #networks: [backend, l3out]  # networks if needed
 
 secrets:
   llm-billing-proxy-config.toml:
     file: ./secrets/llm-billing-proxy-config.toml  # set the location of your config file here
+  #llm-billing-proxy.crt:
+  #  file: ./secrets/llm-billing-proxy.crt
+  #llm-billing-proxy.key:
+  #  file: ./secrets/llm-billing-proxy.key
