@@ -120,7 +120,12 @@ async def handle_resp_stream(f_req, b_res):
         last = chunk
 
     _, _, body_raw = last.partition(b" ")
-    body = json.loads(body_raw)
+
+    try:
+        body = json.loads(body_raw)
+    except json.decoder.JSONDecodeError:
+        app.logger.error("Failed parsing usage information: %s", body_raw)
+        raise
 
     return f_res, body["usage"]
 
