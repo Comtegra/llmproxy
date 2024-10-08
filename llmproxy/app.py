@@ -74,7 +74,10 @@ def main():
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    app.add_routes([aiohttp.web.post("/v1/chat/completions", chat.chat)])
+    app.add_routes([
+        aiohttp.web.post("/v1/chat/completions", chat.chat),
+        aiohttp.web.get("/v1/models", chat.models),
+    ])
 
     ssl_ctx = None
     if (cert := app["config"].get("cert")) and (key := app["config"].get("key")):

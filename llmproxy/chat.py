@@ -120,3 +120,18 @@ async def chat(f_req):
     except aiohttp.ClientError as e:
         app.logger.error("HTTP client error: %s", e)
         raise aiohttp.web.HTTPInternalServerError() from e
+
+
+async def models(req):
+    await auth.require_auth(req)
+
+    data = {
+        "object": "list",
+        "data": [
+            {"id": model, "object": "model", "created": None, "owned_by": None}
+            for model in req.app["config"]["backends"].keys()
+        ],
+    }
+
+    return aiohttp.web.Response(text=json.dumps(data),
+        content_type="application/json")
