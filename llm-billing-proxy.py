@@ -87,8 +87,12 @@ def reload_config(app, config_path):
 async def iter_chunks(stream):
     chunk = bytearray()
     async for data, end in stream.iter_chunks():
+        logging.debug("Received chunk (end=%s): %s", end, data)
         chunk += data
         if end:
+            if not chunk:
+                logging.warning("Received empty chunk, assuming EOF")
+                return
             yield bytes(chunk)
             chunk.clear()
 
