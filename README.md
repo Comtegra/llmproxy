@@ -14,7 +14,7 @@ The program will update the list of configured backends from the config file
 on SIGHUP.
 
 ```sh
-pkill -f -HUP 'python3? .*llm-billing-proxy\.py'
+pkill -f -HUP 'python3? .*llmproxy'
 
 # or in Docker
 docker kill -s=SIGHUP CONTAINER
