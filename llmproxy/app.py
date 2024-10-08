@@ -28,7 +28,10 @@ async def on_startup(app):
     app["db"] = db.Database(app["config"]["db"])
     await app["db"].check()
 
-    timeout = aiohttp.ClientTimeout(connect=app["config"]["timeout_connect"])
+    timeout = aiohttp.ClientTimeout(
+        connect=app["config"]["timeout_connect"],
+        sock_read=app["config"]["timeout_read"],
+    )
     app["client"] = aiohttp.ClientSession(timeout=timeout)
     await check_backends(app)
 

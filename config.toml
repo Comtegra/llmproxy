@@ -2,6 +2,7 @@ log_level = "INFO"
 host = "0.0.0.0"
 port = 8080
 timeout_connect = 5  # backend connection timeout
+timeout_read = 60  # backend response timeout
 #cert = "example.crt"
 #key = "example.key"
 
