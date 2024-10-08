@@ -10,36 +10,25 @@ import yarl
 from . import auth
 
 
-async def iter_chunks(stream):
-    chunk = bytearray()
-    async for data, end in stream.iter_chunks():
-        logging.debug("Received chunk (end=%s): %s", end, data)
-        chunk += data
-        if end:
-            if not chunk:
-                logging.warning("Received empty chunk, assuming EOF")
-                return
-            yield bytes(chunk)
-            chunk.clear()
-
-
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
     f_res = aiohttp.web.StreamResponse()
 
-    last = {}
+    last = b""
 
     try:
         await f_res.prepare(f_req)
-        async for chunk in iter_chunks(b_res.content):
-            last = chunk
-            await f_res.write(chunk)
+        while (c := await b_res.content.readuntil(b"\n\n")):
+            logging.debug("Received chunk: %s", c)
+            last = c
+            await f_res.write(c)
         await f_res.write_eof()
     except OSError as e:
         app.logger.info("Client disconnected: %s", e)
 
-    async for chunk in iter_chunks(b_res.content):
-        last = chunk
+    while (c := await b_res.content.readuntil(b"\n\n")):
+        logging.debug("Received chunk after client disconnected: %s", c)
+        last = c
 
     _, _, body_raw = last.partition(b" ")
 
