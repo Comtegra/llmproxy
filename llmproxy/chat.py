@@ -23,14 +23,6 @@ async def iter_chunks(stream):
             chunk.clear()
 
 
-async def handle_resp(f_req, b_res):
-    body = await b_res.content.read()
-    data = json.loads(body)
-    f_res = aiohttp.web.Response(body=body)
-
-    return f_res, data["usage"]
-
-
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
     f_res = aiohttp.web.StreamResponse()
@@ -90,7 +82,10 @@ async def chat(f_req):
             if b_res.headers.get("Transfer-Encoding", "") == "chunked":
                 f_res, usage = await handle_resp_stream(f_req, b_res)
             else:
-                f_res, usage = await handle_resp(f_req, b_res)
+                body = await b_res.content.read()
+                data = json.loads(body)
+                f_res = aiohttp.web.Response(body=body)
+                usage = data["usage"]
 
             try:
                 await app["db"].put_event(
