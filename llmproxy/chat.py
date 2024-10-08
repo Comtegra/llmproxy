@@ -7,6 +7,8 @@ import aiohttp.web
 import pymongo.errors
 import yarl
 
+from . import auth
+
 
 async def iter_chunks(stream):
     chunk = bytearray()
@@ -63,18 +65,7 @@ async def handle_resp_stream(f_req, b_res):
 async def chat(f_req):
     app = f_req.app
 
-    scheme, _, token = f_req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer":
-        raise aiohttp.web.HTTPUnauthorized(body="Unsupported authorization scheme")
-
-    try:
-        user = await app["db"].get_user(token)
-    except pymongo.errors.PyMongoError as e:
-        app.logger.critical(e)
-        raise aiohttp.web.GracefulExit() from e
-
-    if scheme != "Bearer" or not user:
-        raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
+    user = await auth.require_auth(f_req)
 
     try:
         f_body = await f_req.json()
