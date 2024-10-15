@@ -131,3 +131,4 @@ These documents have the following fields:
     * `DEVICE` is the name of the GPU where the model runs
     * `TYPE` is `prompt` or `completion`
 * `quantity` -- token count
+* `request_id` -- request ID to correlate prompt/completion counts

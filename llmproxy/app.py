@@ -7,6 +7,7 @@ import signal
 import ssl
 import sys
 import tomllib
+import uuid
 
 import aiohttp.web
 import yarl
@@ -40,6 +41,12 @@ async def on_cleanup(app):
     await app["client"].close()
 
 
+@aiohttp.web.middleware
+async def assign_request_id(req, handler):
+    req["request_id"] = uuid.uuid4()
+    return await handler(req)
+
+
 def reload_config(app, config_path):
     try:
         with config_path.open("rb") as f:
@@ -59,7 +66,7 @@ parser.add_argument("-c", "--config", type=pathlib.Path, default="config.toml")
 def main():
     args = parser.parse_args()
 
-    app = aiohttp.web.Application()
+    app = aiohttp.web.Application(middlewares=[assign_request_id])
 
     try:
         with args.config.open("rb") as f:

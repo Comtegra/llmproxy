@@ -84,6 +84,7 @@ async def chat(f_req):
                     device=b_cfg["device"],
                     prompt_n=usage["prompt_tokens"],
                     completion_n=usage["completion_tokens"],
+                    request_id=f_req["request_id"],
                 )
             except pymongo.errors.PyMongoError as e:
                 app.logger.critical(e)

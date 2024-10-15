@@ -25,9 +25,9 @@ class Database:
             ],
         })
 
-    def put_event(self, user, time, model, device, prompt_n, completion_n):
+    def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
         common = {"date_created": time, "user_id": user.get("user_id"),
-            "api_key_id": str(user.get("_id", ""))}
+            "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
 
         prompt = self.db["billing"]["events_oneoff"].insert_one({
             **common,
