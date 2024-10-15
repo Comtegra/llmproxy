@@ -59,7 +59,7 @@ The MongoDB user needs the following privileges:
 
 ```js
 db.getSiblingDB("cgc").createRole({
-  role: "completionBillingWriter",
+  role: "apiKeysReader",
   privileges: [
     {
       resource: {db: "cgc", collection: "api_keys"},
@@ -69,7 +69,7 @@ db.getSiblingDB("cgc").createRole({
   roles: [],
 });
 db.getSiblingDB("billing").createRole({
-  role: "apiKeysReader",
+  role: "completionBillingWriter",
   privileges: [
     {
       resource: {db: "billing", collection: "events_oneoff"},
