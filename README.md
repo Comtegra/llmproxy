@@ -28,7 +28,7 @@ repository and file.
 1. Create a MongoDB user with the following privileges (see section
 [Database](#database) below for JS snippets):
   * `{resource: {db: "cgc", collection: "api_keys"}, actions: ["find"]}`
-  * `{resource: {db: "billing", collection: "event_completions"}, actions: ["insert"]}`
+  * `{resource: {db: "billing", collection: "events_oneoff"}, actions: ["insert"]}`
 2. Copy [config.toml](config.toml) to your repository. A good relative path
 would be `secrets/llm-billing-proxy-config.toml`.
 3. In the config edit `uri` in section `db` so that it includes credentials for
