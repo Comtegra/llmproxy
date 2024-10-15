@@ -104,7 +104,7 @@ When a user attempts to authenticate, the following query is performed to the
 
 ```js
 {
-    "access_level": "COMPLETION",
+    "access_level": "LLM",
     "secret": TOKEN-HASH,
     "$or": [
         {"date_expiry": {"$gt": new Date()}},

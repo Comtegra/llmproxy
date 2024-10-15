@@ -17,7 +17,7 @@ class Database:
 
     def get_user(self, api_key):
         return self.db["cgc"]["api_keys"].find_one({
-            "access_level": "COMPLETION",
+            "access_level": "LLM",
             "secret": hashlib.sha256(api_key.encode()).hexdigest(),
             "$or": [
                 {"date_expiry": None},
