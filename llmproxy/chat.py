@@ -81,8 +81,9 @@ async def chat(f_req):
                     user=user,
                     time=datetime.datetime.now(datetime.UTC),
                     model=f_body["model"],
+                    device=b_cfg["device"],
                     prompt_n=usage["prompt_tokens"],
-                    completion_n=usage["completion_tokens"]
+                    completion_n=usage["completion_tokens"],
                 )
             except pymongo.errors.PyMongoError as e:
                 app.logger.critical(e)

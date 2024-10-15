@@ -72,7 +72,7 @@ db.getSiblingDB("billing").createRole({
   role: "apiKeysReader",
   privileges: [
     {
-      resource: {db: "billing", collection: "events_completion"},
+      resource: {db: "billing", collection: "events_oneoff"},
       actions: ["insert"],
     },
   ],
@@ -119,13 +119,15 @@ The documents are required to have an additional field: `user_id`.
 
 ## Completion logging
 
-When a user performs a completion, a completion event is inserted into the
-collection `billing.events_completion`.
+When a user performs a completion, two events (prompt token and completion
+token counts) are inserted into the collection `billing.events_oneoff`.
 These documents have the following fields:
 
 * `date_created` -- date and time when the request finished processing
 * `user_id` -- `user_id` of the API key
 * `api_key_id` -- id of the API key
-* `model` -- name of the model used for completion
-* `prompt_n` -- prompt token count
-* `completion_n` -- completion token count
+* `product` -- a string in the following format: `MODEL/DEVICE/TYPE`, where
+    * `MODEL` is the name of the backend
+    * `DEVICE` is the name of the GPU where the model runs
+    * `TYPE` is `prompt` or `completion`
+* `quantity` -- token count

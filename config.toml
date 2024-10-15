@@ -12,11 +12,14 @@ uri = "mongodb://llm-billing-proxy:mypass@mongohost:27017/?authSource=cgc"
 [backends.llama31-70b]
 url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
 token = "MY-TOKEN1"
+device = "a100"
 
 [backends.llama3-sqlcoder-8b]
 url = "https://llm-server2.comtegra.cgc-waw-01.comtegra.cloud"
 token = "MY-TOKEN2"
+device = "a5000"
 
 [backends.llama31-8b]
 url = "https://llm-server-bis.comtegra.cgc-waw-01.comtegra.cloud"
 token = "MY-TOKEN3"
+device = "a5000"

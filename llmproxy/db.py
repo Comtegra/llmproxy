@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import hashlib
 
@@ -24,12 +25,20 @@ class Database:
             ],
         })
 
-    def put_event(self, user, time, model, prompt_n, completion_n):
-        return self.db["billing"]["events_completion"].insert_one({
-            "date_created": time,
-            "user_id": user.get("user_id"),
-            "api_key_id": str(user.get("_id", "")),
-            "model": model,
-            "prompt_n": prompt_n,
-            "completion_n": completion_n,
+    def put_event(self, user, time, model, device, prompt_n, completion_n):
+        common = {"date_created": time, "user_id": user.get("user_id"),
+            "api_key_id": str(user.get("_id", ""))}
+
+        prompt = self.db["billing"]["events_oneoff"].insert_one({
+            **common,
+            "product": "%s/%s/prompt" % (model, device),
+            "quantity": prompt_n,
         })
+
+        completion = self.db["billing"]["events_oneoff"].insert_one({
+            **common,
+            "product": "%s/%s/completion" % (model, device),
+            "quantity": completion_n,
+        })
+
+        return asyncio.gather(prompt, completion)
