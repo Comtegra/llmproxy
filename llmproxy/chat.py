@@ -114,8 +114,9 @@ async def models(req):
     data = {
         "object": "list",
         "data": [
-            {"id": model, "object": "model", "created": None, "owned_by": None}
-            for model in req.app["config"]["backends"].keys()
+            {"id": model, "object": "model", "created": None, "owned_by": None,
+                "device": meta.get("device")}
+            for model, meta in req.app["config"]["backends"].items()
         ],
     }
 
