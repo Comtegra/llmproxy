@@ -17,12 +17,14 @@ from . import chat, db
 
 async def check_backends(app):
     for name, cfg in app["config"]["backends"].items():
-        async with app["client"].get(yarl.URL(cfg["url"]) / "health") as res:
-            if res.ok:
-                logging.info("Backend %s ready", name)
-            else:
-                logging.error("Backend %s not ready: %d %s",
-                    name, res.status, res.reason)
+        try:
+            data = {"n_predict": 1, "messages": []}
+            hdr = {"Authorization": "Bearer %s" % cfg.get("token", "")}
+            await app["client"].post(yarl.URL(cfg["url"]) / "v1/chat/completions",
+                json=data, headers=hdr, raise_for_status=True)
+            logging.info("Backend %s ready", name)
+        except aiohttp.ClientError as e:
+            logging.error("Backend %s not ready: %s", name, e)
 
 
 async def on_startup(app):
