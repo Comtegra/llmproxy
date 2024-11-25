@@ -53,6 +53,8 @@ async def chat(f_req):
     except json.decoder.JSONDecodeError as e:
         raise aiohttp.web.HTTPBadRequest(body="JSON decode error: %s" % e)
 
+    app.logger.debug("Frontend request body:\n%s", f_body)
+
     try:
         b_cfg = app["config"]["backends"][f_body["model"]]
     except KeyError:
@@ -62,7 +64,10 @@ async def chat(f_req):
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     try:
+        app.logger.debug("Sending backend request")
         async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
+            app.logger.debug("Backend request completed")
+
             if b_res.status != 200:
                 app.logger.error("Backend \"%s\" error: %d %s", f_body["model"],
                     b_res.status, (await b_res.text()))
