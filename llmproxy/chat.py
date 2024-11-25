@@ -73,7 +73,9 @@ async def chat(f_req):
             else:
                 body = await b_res.content.read()
                 data = json.loads(body)
-                f_res = aiohttp.web.Response(body=body)
+                f_hdrs = {"Content-Type":
+                    b_res.headers.get("Content-Type", "application/octet-stream")}
+                f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
                 usage = data["usage"]
 
             try:
