@@ -5,15 +5,32 @@ import hashlib
 import motor.motor_asyncio
 import pymongo.server_api
 
+async def get_db(req):
+    if "db" not in req:
+        uri = req.app["config"]["db"]["uri"]
+        req["db"] = await Database.create(uri, req.app.logger)
+
+    return req["db"]
+
 
 class Database:
-    def __init__(self, cfg):
-        self.db = motor.motor_asyncio.AsyncIOMotorClient(cfg["uri"],
+    @classmethod
+    async def create(cls, uri, logger):
+        self = cls()
+
+        self.logger = logger
+        self.db = motor.motor_asyncio.AsyncIOMotorClient(uri,
             tz_aware=True, connect=True,
             server_api=pymongo.server_api.ServerApi('1'))
 
-    def check(self):
-        return self.db.admin.command("ping")
+        await self.db.admin.command("ping")
+        self.logger.debug("Connected to database")
+
+        return self
+
+    def close(self):
+        self.db.close()
+        self.logger.debug("Closed database connection")
 
     def get_user(self, api_key):
         return self.db["cgc"]["api_keys"].find_one({

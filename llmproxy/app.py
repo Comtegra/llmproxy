@@ -28,9 +28,6 @@ async def check_backends(app):
 
 
 async def on_startup(app):
-    app["db"] = db.Database(app["config"]["db"])
-    await app["db"].check()
-
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
         sock_read=app["config"]["timeout_read"],
@@ -47,6 +44,18 @@ async def on_cleanup(app):
 async def assign_request_id(req, handler):
     req["request_id"] = uuid.uuid4()
     return await handler(req)
+
+
+@aiohttp.web.middleware
+async def close_db(req, handler):
+    try:
+        res = await handler(req)
+    finally:
+        db = req.pop("db", None)
+        if db is not None:
+            db.close()
+
+    return res
 
 
 def reload_config(app, config_path):
@@ -68,7 +77,7 @@ parser.add_argument("-c", "--config", type=pathlib.Path, default="config.toml")
 def main():
     args = parser.parse_args()
 
-    app = aiohttp.web.Application(middlewares=[assign_request_id])
+    app = aiohttp.web.Application(middlewares=[assign_request_id, close_db])
 
     try:
         with args.config.open("rb") as f:

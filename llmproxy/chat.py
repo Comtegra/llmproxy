@@ -8,6 +8,7 @@ import pymongo.errors
 import yarl
 
 from . import auth
+from .db import get_db
 
 
 async def handle_resp_stream(f_req, b_res):
@@ -45,6 +46,8 @@ async def handle_resp_stream(f_req, b_res):
 # Backend related variables are prefixed with b_.
 async def chat(f_req):
     app = f_req.app
+
+    db = await get_db(f_req)
 
     user = await auth.require_auth(f_req)
 
@@ -84,7 +87,7 @@ async def chat(f_req):
                 usage = data["usage"]
 
             try:
-                await app["db"].put_event(
+                await db.put_event(
                     user=user,
                     time=datetime.datetime.now(datetime.UTC),
                     model=f_body["model"],
