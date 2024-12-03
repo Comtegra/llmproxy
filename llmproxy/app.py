@@ -53,7 +53,7 @@ async def close_db(req, handler):
     finally:
         db = req.pop("db", None)
         if db is not None:
-            db.close()
+            await db.close()
 
     return res
 

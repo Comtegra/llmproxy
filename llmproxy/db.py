@@ -28,12 +28,12 @@ class Database:
 
         return self
 
-    def close(self):
+    async def close(self):
         self.db.close()
         self.logger.debug("Closed database connection")
 
-    def get_user(self, api_key):
-        return self.db["cgc"]["api_keys"].find_one({
+    async def get_user(self, api_key):
+        return await self.db["cgc"]["api_keys"].find_one({
             "access_level": "LLM",
             "secret": hashlib.sha256(api_key.encode()).hexdigest(),
             "$or": [
@@ -42,7 +42,7 @@ class Database:
             ],
         })
 
-    def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
+    async def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
         common = {"date_created": time, "user_id": user.get("user_id"),
             "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
 
@@ -58,4 +58,4 @@ class Database:
             "quantity": completion_n,
         })
 
-        return asyncio.gather(prompt, completion)
+        return await asyncio.gather(prompt, completion)
