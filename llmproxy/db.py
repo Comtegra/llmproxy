@@ -126,7 +126,7 @@ class SqliteDatabase:
             await self.db.execute("""
                 INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
                 VALUES (?, ?, ?, ?, ?)
-                """, (time, user, product_completion, prompt_n, str(request_id)))
+                """, (time, user, product_completion, completion_n, str(request_id)))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 
