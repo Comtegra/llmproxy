@@ -7,7 +7,8 @@ timeout_read = 60  # backend response timeout
 #key = "example.key"
 
 [db]
-uri = "mongodb://llm-billing-proxy:mypass@mongohost:27017/?authSource=cgc"
+uri = "sqlite://db.sqlite"
+#uri = "mongodb://llm-billing-proxy:mypass@mongohost:27017/?authSource=cgc"
 
 [backends.llama31-70b]
 url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
