@@ -8,7 +8,7 @@ import pymongo.errors
 import yarl
 
 from . import auth
-from .db import get_db
+from .db import DatabaseError, get_db
 
 
 async def handle_resp_stream(f_req, b_res):
@@ -96,7 +96,7 @@ async def chat(f_req):
                     completion_n=usage["completion_tokens"],
                     request_id=f_req["request_id"],
                 )
-            except pymongo.errors.PyMongoError as e:
+            except DatabaseError as e:
                 app.logger.critical(e)
                 raise aiohttp.web.GracefulExit() from e
 

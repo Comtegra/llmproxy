@@ -13,6 +13,10 @@ async def get_db(req):
     return req["db"]
 
 
+class DatabaseError(Exception):
+    pass
+
+
 class Database:
     @classmethod
     async def create(cls, uri, logger):
@@ -33,29 +37,33 @@ class Database:
         self.logger.debug("Closed database connection")
 
     async def get_user(self, api_key):
-        return await self.db["cgc"]["api_keys"].find_one({
-            "access_level": "LLM",
-            "secret": hashlib.sha256(api_key.encode()).hexdigest(),
-            "$or": [
-                {"date_expiry": None},
-                {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
-            ],
-        })
+        try:
+            return await self.db["cgc"]["api_keys"].find_one({
+                "access_level": "LLM",
+                "secret": hashlib.sha256(api_key.encode()).hexdigest(),
+                "$or": [
+                    {"date_expiry": None},
+                    {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
+                ],
+            })
+        except pymongo.errors.PyMongoError as e:
+            raise DatabaseError(e) from e
 
     async def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
         common = {"date_created": time, "user_id": user.get("user_id"),
             "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
 
-        prompt = self.db["billing"]["events_oneoff"].insert_one({
-            **common,
-            "product": "%s/%s/prompt" % (model, device),
-            "quantity": prompt_n,
-        })
+        try:
+            await self.db["billing"]["events_oneoff"].insert_one({
+                **common,
+                "product": "%s/%s/prompt" % (model, device),
+                "quantity": prompt_n,
+            })
 
-        completion = self.db["billing"]["events_oneoff"].insert_one({
-            **common,
-            "product": "%s/%s/completion" % (model, device),
-            "quantity": completion_n,
-        })
-
-        return await asyncio.gather(prompt, completion)
+            await self.db["billing"]["events_oneoff"].insert_one({
+                **common,
+                "product": "%s/%s/completion" % (model, device),
+                "quantity": completion_n,
+            })
+        except pymongo.errors.PyMongoError as e:
+            raise DatabaseError(e) from e
