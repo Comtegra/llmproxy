@@ -57,21 +57,15 @@ class MongoDatabase:
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
 
-    async def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
+    async def put_event(self, user, time, product, quantity, request_id):
         common = {"date_created": time, "user_id": user.get("user_id"),
             "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
 
         try:
             await self.db["billing"]["events_oneoff"].insert_one({
                 **common,
-                "product": "%s/%s/prompt" % (model, device),
-                "quantity": prompt_n,
-            })
-
-            await self.db["billing"]["events_oneoff"].insert_one({
-                **common,
-                "product": "%s/%s/completion" % (model, device),
-                "quantity": completion_n,
+                "product": product,
+                "quantity": quantity,
             })
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
@@ -113,20 +107,12 @@ class SqliteDatabase:
 
         return row
 
-    async def put_event(self, user, time, model, device, prompt_n, completion_n, request_id):
-        product_prompt = "%s/%s/prompt" % (model, device)
-        product_completion = "%s/%s/completion" % (model, device)
-
+    async def put_event(self, user, time, product, quantity, request_id):
         try:
             await self.db.execute("""
                 INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
                 VALUES (?, ?, ?, ?, ?)
-                """, (time, user, product_prompt, prompt_n, str(request_id)))
-
-            await self.db.execute("""
-                INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
-                VALUES (?, ?, ?, ?, ?)
-                """, (time, user, product_completion, completion_n, str(request_id)))
+                """, (time, user, product, quantity, str(request_id)))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 

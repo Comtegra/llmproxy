@@ -90,10 +90,15 @@ async def chat(f_req):
                 await db.put_event(
                     user=user,
                     time=datetime.datetime.now(datetime.UTC),
-                    model=f_body["model"],
-                    device=b_cfg["device"],
-                    prompt_n=usage["prompt_tokens"],
-                    completion_n=usage["completion_tokens"],
+                    product="%s/%s/prompt" % (f_body["model"], b_cfg["device"]),
+                    quantity=usage["prompt_tokens"],
+                    request_id=f_req["request_id"],
+                )
+                await db.put_event(
+                    user=user,
+                    time=datetime.datetime.now(datetime.UTC),
+                    product="%s/%s/completion" % (f_body["model"], b_cfg["device"]),
+                    quantity=usage["completion_tokens"],
                     request_id=f_req["request_id"],
                 )
             except DatabaseError as e:
