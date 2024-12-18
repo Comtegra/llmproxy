@@ -5,7 +5,7 @@ import logging
 import aiohttp
 import aiohttp.web
 
-from . import auth
+from . import auth, proxy
 from .db import DatabaseError, get_db
 
 
@@ -45,80 +45,52 @@ async def handle_resp_stream(f_req, b_res):
 async def chat(f_req):
     app = f_req.app
 
-    db = await get_db(f_req)
-
     user = await auth.require_auth(f_req)
 
-    try:
-        f_body = await f_req.json()
-    except json.decoder.JSONDecodeError as e:
-        raise aiohttp.web.HTTPBadRequest(body="JSON decode error: %s" % e)
+    b_req, b_name, b_cfg = await proxy.request(f_req)
+    async with b_req as b_res:
+        app.logger.debug("Backend request completed")
 
-    app.logger.debug("Frontend request body:\n%s", f_body)
+        if b_res.status != 200:
+            app.logger.error("Backend \"%s\" error: %d %s", b_name,
+                b_res.status, (await b_res.text()))
+            raise aiohttp.web.HTTPBadGateway()
 
-    try:
-        b_cfg = app["config"]["backends"][f_body["model"]]
-    except KeyError:
-        raise aiohttp.web.HTTPUnauthorized(body="Incorrect model")
+        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
+            f_res, usage = await handle_resp_stream(f_req, b_res)
+        else:
+            body = await b_res.content.read()
+            data = json.loads(body)
+            f_hdrs = {"Content-Type":
+                b_res.headers.get("Content-Type", "application/octet-stream")}
+            f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
+            usage = data["usage"]
 
-    b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
-    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
+        db = await get_db(f_req)
+        try:
+            await db.put_event(
+                user=user,
+                time=datetime.datetime.now(datetime.UTC),
+                product="%s/%s/prompt" % (b_name, b_cfg["device"]),
+                quantity=usage["prompt_tokens"],
+                request_id=f_req["request_id"],
+            )
+            await db.put_event(
+                user=user,
+                time=datetime.datetime.now(datetime.UTC),
+                product="%s/%s/completion" % (b_name, b_cfg["device"]),
+                quantity=usage["completion_tokens"],
+                request_id=f_req["request_id"],
+            )
+        except DatabaseError as e:
+            app.logger.critical(e)
+            raise aiohttp.web.GracefulExit() from e
 
-    try:
-        app.logger.debug("Sending backend request")
-        async with app["client"].post(b_url, headers=b_hdrs, json=f_body) as b_res:
-            app.logger.debug("Backend request completed")
+        app.logger.info("Client used: P:%d C:%d tokens of %s",
+            usage["prompt_tokens"], usage["completion_tokens"],
+            b_name)
 
-            if b_res.status != 200:
-                app.logger.error("Backend \"%s\" error: %d %s", f_body["model"],
-                    b_res.status, (await b_res.text()))
-                raise aiohttp.web.HTTPBadGateway()
-
-            if b_res.headers.get("Transfer-Encoding", "") == "chunked":
-                f_res, usage = await handle_resp_stream(f_req, b_res)
-            else:
-                body = await b_res.content.read()
-                data = json.loads(body)
-                f_hdrs = {"Content-Type":
-                    b_res.headers.get("Content-Type", "application/octet-stream")}
-                f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
-                usage = data["usage"]
-
-            try:
-                await db.put_event(
-                    user=user,
-                    time=datetime.datetime.now(datetime.UTC),
-                    product="%s/%s/prompt" % (f_body["model"], b_cfg["device"]),
-                    quantity=usage["prompt_tokens"],
-                    request_id=f_req["request_id"],
-                )
-                await db.put_event(
-                    user=user,
-                    time=datetime.datetime.now(datetime.UTC),
-                    product="%s/%s/completion" % (f_body["model"], b_cfg["device"]),
-                    quantity=usage["completion_tokens"],
-                    request_id=f_req["request_id"],
-                )
-            except DatabaseError as e:
-                app.logger.critical(e)
-                raise aiohttp.web.GracefulExit() from e
-
-            app.logger.info("Client used: P:%d C:%d tokens of %s",
-                usage["prompt_tokens"], usage["completion_tokens"],
-                f_body["model"])
-
-            return f_res
-    except aiohttp.ServerTimeoutError as e:
-        app.logger.error("Backend timeout: %s", e)
-        raise aiohttp.web.HTTPGatewayTimeout() from e
-    except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
-            aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
-            aiohttp.InvalidURL) as e:
-        app.logger.error("Backend error: %s", e)
-        raise aiohttp.web.HTTPBadGateway() from e
-    except aiohttp.ClientError as e:
-        app.logger.error("HTTP client error: %s", e)
-        raise aiohttp.web.HTTPInternalServerError() from e
+        return f_res
 
 
 async def models(req):

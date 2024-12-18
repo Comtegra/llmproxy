@@ -12,7 +12,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import chat
+from . import chat, embeddings
 
 
 async def check_backends(app):
@@ -96,6 +96,7 @@ def main():
     app.add_routes([
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
+        aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
     ])
 
     ssl_ctx = None
