@@ -4,8 +4,6 @@ import logging
 
 import aiohttp
 import aiohttp.web
-import pymongo.errors
-import yarl
 
 from . import auth
 from .db import DatabaseError, get_db

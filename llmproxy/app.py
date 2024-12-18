@@ -12,7 +12,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import chat, db
+from . import chat
 
 
 async def check_backends(app):
