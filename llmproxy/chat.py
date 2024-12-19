@@ -11,7 +11,9 @@ from .db import DatabaseError, get_db
 
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
-    f_res = aiohttp.web.StreamResponse()
+    headers = {"Content-Type":
+        b_res.headers.get("Content-Type", "application/octet-stream")}
+    f_res = aiohttp.web.StreamResponse(headers=headers)
 
     last = b""
 
