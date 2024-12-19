@@ -88,8 +88,10 @@ def main():
     logging.basicConfig(format=log_fmt, level=app["config"]["log_level"])
 
     loop = asyncio.new_event_loop()
-    loop.add_signal_handler(signal.SIGHUP,
-        functools.partial(reload_config, app, args.config))
+
+    if hasattr(signal, "SIGHUP"):
+        loop.add_signal_handler(signal.SIGHUP,
+            functools.partial(reload_config, app, args.config))
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
