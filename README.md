@@ -7,6 +7,17 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 * Python >=3.11
 * Python packages from [requirements.txt](requirements.txt)
 
+## Quick start
+
+```sh
+python3 -m venv venv
+source venv/bin/activate
+
+sqlite3 db.sqlite < schema.sql
+
+python3 -m llmproxy
+```
+
 ## Configuration
 
 See [config.toml](config.toml) for an example configuration file.
