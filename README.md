@@ -4,6 +4,7 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 
 ## Requirements
 
+* Python >=3.11
 * Python packages from [requirements.txt](requirements.txt)
 
 ## Configuration
