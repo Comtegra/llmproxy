@@ -14,6 +14,7 @@ uri = "sqlite://db.sqlite"
 url = "https://llm-server.comtegra.cgc-waw-01.comtegra.cloud"
 token = "MY-TOKEN1"
 device = "a100"
+model = "llama3-70b"  # model name passed to the backend, default: backend name
 
 [backends.llama3-sqlcoder-8b]
 url = "https://llm-server2.comtegra.cgc-waw-01.comtegra.cloud"

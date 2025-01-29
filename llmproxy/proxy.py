@@ -25,9 +25,13 @@ async def request(f_req):
     b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
+    b_body = f_body.copy()
+    if (m := b_cfg.get("model")) is not None:
+        b_body["model"] = m
+
     try:
         app.logger.debug("Sending backend request")
-        return (app["client"].post(b_url, headers=b_hdrs, json=f_body),
+        return (app["client"].post(b_url, headers=b_hdrs, json=b_body),
             b_name, b_cfg)
     except aiohttp.ServerTimeoutError as e:
         app.logger.error("Backend timeout: %s", e)
