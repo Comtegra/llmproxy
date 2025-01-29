@@ -20,16 +20,18 @@ async def handle_resp_stream(f_req, b_res):
     try:
         await f_res.prepare(f_req)
         while (c := await b_res.content.readuntil(b"\n\n")):
-            logging.debug("Received chunk: %s", c)
-            last = c
+            if c != b"data: [DONE]\n\n":
+                logging.debug("Received chunk: %s", c)
+                last = c
             await f_res.write(c)
         await f_res.write_eof()
     except OSError as e:
         app.logger.info("Client disconnected: %s", e)
 
     while (c := await b_res.content.readuntil(b"\n\n")):
-        logging.debug("Received chunk after client disconnected: %s", c)
-        last = c
+        if c != b"data: [DONE]\n\n":
+            logging.debug("Received chunk after client disconnected: %s", c)
+            last = c
 
     _, _, body_raw = last.partition(b" ")
 
