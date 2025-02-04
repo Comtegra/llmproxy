@@ -18,7 +18,8 @@ from . import chat, embeddings
 async def check_backends(app):
     for name, cfg in app["config"]["backends"].items():
         try:
-            await app["client"].get(yarl.URL(cfg["url"]) / "health",
+            ssl = None if cfg.get("verify_ssl", True) else False
+            await app["client"].get(yarl.URL(cfg["url"]) / "health", ssl=ssl,
                 raise_for_status=True)
             logging.info("Backend %s ready", name)
         except aiohttp.ClientError as e:

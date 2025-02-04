@@ -31,7 +31,8 @@ async def request(f_req):
 
     try:
         app.logger.debug("Sending backend request")
-        return (app["client"].post(b_url, headers=b_hdrs, json=b_body),
+        ssl = None if b_cfg.get("verify_ssl", True) else False
+        return (app["client"].post(b_url, headers=b_hdrs, json=b_body, ssl=ssl),
             b_name, b_cfg)
     except aiohttp.ServerTimeoutError as e:
         app.logger.error("Backend timeout: %s", e)
