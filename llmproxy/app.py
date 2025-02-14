@@ -46,6 +46,14 @@ async def assign_request_id(req, handler):
 
 
 @aiohttp.web.middleware
+async def add_cors_headers(req, handler):
+    res = await handler(req)
+    if o := req.app["config"].get("http_origin"):
+        res.headers["Access-Control-Allow-Origin"] = o
+    return res
+
+
+@aiohttp.web.middleware
 async def close_db(req, handler):
     try:
         res = await handler(req)
@@ -76,7 +84,8 @@ parser.add_argument("-c", "--config", type=pathlib.Path, default="config.toml")
 def main():
     args = parser.parse_args()
 
-    app = aiohttp.web.Application(middlewares=[assign_request_id, close_db])
+    app = aiohttp.web.Application(
+        middlewares=[assign_request_id, add_cors_headers, close_db])
 
     try:
         with args.config.open("rb") as f:

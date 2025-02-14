@@ -5,6 +5,7 @@ timeout_connect = 5  # backend connection timeout
 timeout_read = 60  # backend response timeout
 #cert = "example.crt"
 #key = "example.key"
+http_origin = "*"  # allowed HTTP origins
 
 [db]
 uri = "sqlite://db.sqlite"
