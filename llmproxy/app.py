@@ -47,7 +47,12 @@ async def assign_request_id(req, handler):
 
 @aiohttp.web.middleware
 async def add_cors_headers(req, handler):
-    res = await handler(req)
+    try:
+        res = await handler(req)
+    except aiohttp.web.HTTPMethodNotAllowed as e:
+        if e.method != "OPTIONS":
+            raise
+        res = aiohttp.web.Response()
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
     return res
