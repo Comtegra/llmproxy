@@ -53,6 +53,7 @@ async def add_cors_headers(req, handler):
         if e.method != "OPTIONS":
             raise
         res = aiohttp.web.Response()
+    res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
     return res
