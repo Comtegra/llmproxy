@@ -15,6 +15,10 @@ async def handle_resp_stream(f_req, b_res):
         b_res.headers.get("Content-Type", "application/octet-stream")}
     f_res = aiohttp.web.StreamResponse(headers=headers)
 
+    f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    if o := app["config"].get("http_origin"):
+        f_res.headers["Access-Control-Allow-Origin"] = o
+
     last = b""
 
     try:
