@@ -5,7 +5,7 @@ from .db import get_db
 
 
 async def require_auth(req):
-    db = await get_db(req)
+    db = await get_db(req.app["config"]["db"]["uri"], req)
 
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
     if scheme != "Bearer":

@@ -30,7 +30,7 @@ async def embeddings(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
         usage = data["usage"]
 
-        db = await get_db(f_req)
+        db = await get_db(app["config"]["db"]["uri"], f_req)
         try:
             await db.put_event(
                 user=user,

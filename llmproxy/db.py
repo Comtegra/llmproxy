@@ -9,18 +9,22 @@ import pymongo.server_api
 
 logger = logging.getLogger(__name__)
 
-async def get_db(req):
-    if "db" not in req:
-        uri = req.app["config"]["db"]["uri"]
 
-        if uri.startswith("mongodb://"):
-            req["db"] = await MongoDatabase.create(uri)
-        elif uri.startswith("sqlite://"):
-            req["db"] = await SqliteDatabase.create(uri)
-        else:
-            raise ValueError("Unrecognized URI scheme: \"%s\"" % uri)
+async def get_db(uri, req=None):
+    if req is not None and "db" in req:
+        return req["db"]
 
-    return req["db"]
+    if uri.startswith("mongodb://"):
+        db = await MongoDatabase.create(uri)
+    elif uri.startswith("sqlite://"):
+        db = await SqliteDatabase.create(uri)
+    else:
+        raise ValueError("Unrecognized URI scheme: \"%s\"" % uri)
+
+    if req is not None:
+        req["db"] = db
+
+    return db
 
 
 class DatabaseError(Exception):
