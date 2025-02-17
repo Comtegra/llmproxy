@@ -1,20 +1,22 @@
 import datetime
 import hashlib
+import logging
 import sqlite3
 
 import aiosqlite
 import motor.motor_asyncio
 import pymongo.server_api
 
+logger = logging.getLogger(__name__)
 
 async def get_db(req):
     if "db" not in req:
         uri = req.app["config"]["db"]["uri"]
 
         if uri.startswith("mongodb://"):
-            req["db"] = await MongoDatabase.create(uri, req.app.logger)
+            req["db"] = await MongoDatabase.create(uri)
         elif uri.startswith("sqlite://"):
-            req["db"] = await SqliteDatabase.create(uri, req.app.logger)
+            req["db"] = await SqliteDatabase.create(uri)
         else:
             raise ValueError("Unrecognized URI scheme: \"%s\"" % uri)
 
@@ -27,22 +29,21 @@ class DatabaseError(Exception):
 
 class MongoDatabase:
     @classmethod
-    async def create(cls, uri, logger):
+    async def create(cls, uri):
         self = cls()
 
-        self.logger = logger
         self.db = motor.motor_asyncio.AsyncIOMotorClient(uri,
             tz_aware=True, connect=True,
             server_api=pymongo.server_api.ServerApi('1'))
 
         await self.db.admin.command("ping")
-        self.logger.debug("Connected to database")
+        logger.debug("Connected to database")
 
         return self
 
     async def close(self):
         self.db.close()
-        self.logger.debug("Closed database connection")
+        logger.debug("Closed database connection")
 
     async def get_user(self, api_key):
         try:
@@ -73,20 +74,19 @@ class MongoDatabase:
 
 class SqliteDatabase:
     @classmethod
-    async def create(cls, uri, logger):
+    async def create(cls, uri):
         path = uri.removeprefix("sqlite://")
         assert path != uri
 
         self = cls()
-        self.logger = logger
         self.db = await aiosqlite.connect(path)
-        self.logger.debug("Connected to database")
+        logger.debug("Connected to database")
 
         return self
 
     async def close(self):
         await self.db.close()
-        self.logger.debug("Closed database connection")
+        logger.debug("Closed database connection")
 
     async def get_user(self, api_key):
         digest = hashlib.sha256(api_key.encode()).hexdigest()
