@@ -96,6 +96,59 @@ parser_user_list.add_argument("hash", nargs="?", default="",
 parser_user_list.set_defaults(func=command_user_list)
 
 
+# Command: user update
+
+async def command_user_update(args):
+    if args.expires is None and args.comment is None:
+        print("No fields to update. Specify -e or -t.", file=sys.stderr)
+        sys.exit(1)
+
+    update = {}
+
+    if args.expires == "":
+        update["expires"] = None
+    elif args.expires is not None:
+        try:
+            update["expires"] = isodatetime(args.expires)
+        except ValueError as e:
+            print("Failed to parse date:", e, file=sys.stderr)
+            sys.exit(1)
+
+    if args.comment is not None:
+        update["comment"] = args.comment
+
+    db = await get_db(uri=args.config["db"]["uri"])
+
+    try:
+        users = await db.user_list(args.hash, include_expired=True)
+        if not users:
+            print("User not found.", file=sys.stderr)
+            await db.close()
+            sys.exit(1)
+
+        if len(users) > 1:
+            print("More than one user found. Specify more of the hash prefix.",
+                file=sys.stderr)
+            await db.close()
+            sys.exit(1)
+
+        await db.user_update(users[0], **update)
+    except DatabaseError as e:
+        print("Database error:", e, file=sys.stderr)
+        await db.close()
+        sys.exit(1)
+
+    await db.close()
+
+    print("User updated", file=sys.stderr)
+
+parser_user_update = subparsers_user.add_parser("update")
+parser_user_update.add_argument("-e", "--expires")
+parser_user_update.add_argument("-t", "--comment")
+parser_user_update.add_argument("hash")
+parser_user_update.set_defaults(func=command_user_update)
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
     asyncio.run(args.func(args))

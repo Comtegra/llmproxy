@@ -73,6 +73,9 @@ class MongoDatabase:
             "expires": x.get("date_expiry", None), "comment": x.get("comment")}
             for x in res]
 
+    async def user_update(self, user, **kwargs):
+        raise NotImplementedError("not implemented for MongoDB")
+
     async def event_create(self, user, time, product, quantity, request_id):
         common = {"date_created": time, "user_id": user.get("_user_id"),
             "api_key_id": str(user.get("id", "")), "request_id": str(request_id)}
@@ -143,6 +146,22 @@ class SqliteDatabase:
         await cur.close()
 
         return rows
+
+    async def user_update(self, user, **kwargs):
+        assert kwargs.keys() <= {"expires", "comment"}
+        try:
+            if "expires" in kwargs:
+                await self.db.execute("""
+                    UPDATE api_key SET expires = ? WHERE id = ?
+                    """, (kwargs["expires"], user["id"]))
+            if "comment" in kwargs:
+                await self.db.execute("""
+                    UPDATE api_key SET comment = ? WHERE id = ?
+                    """, (kwargs["comment"], user["id"]))
+        except sqlite3.DatabaseError as e:
+            raise DatabaseError(e) from e
+
+        await self.db.commit()
 
     async def event_create(self, user, time, product, quantity, request_id):
         try:
