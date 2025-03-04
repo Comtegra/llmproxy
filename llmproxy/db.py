@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import logging
 import sqlite3
+import uuid
 
 import aiosqlite
 import motor.motor_asyncio
@@ -49,6 +50,9 @@ class MongoDatabase:
         self.db.close()
         logger.debug("Closed database connection")
 
+    async def user_create(self, secret_hash, expires=None, comment=None):
+        raise NotImplementedError("not implemented for MongoDB")
+
     async def user_get(self, api_key):
         try:
             return await self.db["cgc"]["api_keys"].find_one({
@@ -91,6 +95,21 @@ class SqliteDatabase:
     async def close(self):
         await self.db.close()
         logger.debug("Closed database connection")
+
+    async def user_create(self, secret_hash, expires=None, comment=None):
+        id_ = str(uuid.uuid4())
+
+        try:
+            await self.db.execute("""
+                INSERT INTO api_key (id, secret, type, expires, comment)
+                VALUES (?, ?, 'LLM', ?, ?)
+                """, (id_, secret_hash, expires, comment))
+        except sqlite3.DatabaseError as e:
+            raise DatabaseError(e) from e
+
+        await self.db.commit()
+
+        return id_
 
     async def user_get(self, api_key):
         digest = hashlib.sha256(api_key.encode()).hexdigest()
