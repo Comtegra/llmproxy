@@ -6,13 +6,12 @@ import pathlib
 import signal
 import ssl
 import sys
-import tomllib
 import uuid
 
 import aiohttp.web
 import yarl
 
-from . import chat, embeddings
+from . import chat, config, embeddings
 
 
 async def check_backends(app):
@@ -71,20 +70,21 @@ async def close_db(req, handler):
     return res
 
 
-def reload_config(app, config_path):
+def reload_config(app):
     try:
-        with config_path.open("rb") as f:
-            # Only backends are reloaded
-            cfg = tomllib.load(f)
-            app["config"]["backends"] = cfg["backends"]
-            app.logger.info("Config reloaded. Configured backends: %s",
-                " ".join(app["config"]["backends"]))
+        cfg = config.load(app["config"]["_path"])
     except OSError as e:
         app.logger.error("Failed reloading config: %s", e)
+        return
+
+    # Only backends are reloaded
+    app["config"]["backends"] = cfg["backends"]
+    app.logger.info("Config reloaded. Configured backends: %s",
+        " ".join(app["config"]["backends"]))
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-c", "--config", type=pathlib.Path, default="config.toml")
+parser.add_argument("-c", "--config", type=pathlib.Path)
 
 
 def main():
@@ -94,8 +94,7 @@ def main():
         middlewares=[assign_request_id, add_cors_headers, close_db])
 
     try:
-        with args.config.open("rb") as f:
-            app["config"] = tomllib.load(f)
+        app["config"] = config.load(args.config)
     except OSError as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
@@ -107,7 +106,7 @@ def main():
 
     if hasattr(signal, "SIGHUP"):
         loop.add_signal_handler(signal.SIGHUP,
-            functools.partial(reload_config, app, args.config))
+            functools.partial(reload_config, app))
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
