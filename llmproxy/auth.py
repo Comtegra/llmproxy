@@ -1,3 +1,5 @@
+import hashlib
+
 import aiohttp.web
 import pymongo.errors
 
@@ -11,13 +13,15 @@ async def require_auth(req):
     if scheme != "Bearer":
         raise aiohttp.web.HTTPUnauthorized(body="Unsupported authorization scheme")
 
+    digest = hashlib.sha256(token.encode()).hexdigest()
+
     try:
-        user = await db.user_get(token)
+        rows = await db.user_list(digest)
     except pymongo.errors.PyMongoError as e:
         req.app.logger.critical(e)
         raise aiohttp.web.GracefulExit() from e
 
-    if scheme != "Bearer" or not user:
+    if not rows:
         raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
 
-    return user
+    return rows[0]

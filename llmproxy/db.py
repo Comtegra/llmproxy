@@ -53,22 +53,29 @@ class MongoDatabase:
     async def user_create(self, secret_hash, expires=None, comment=None):
         raise NotImplementedError("not implemented for MongoDB")
 
-    async def user_get(self, api_key):
+    async def user_list(self, secret_hash="", include_expired=False):
+        if include_expired:
+            raise NotImplementedError("not implemented for MongoDB")
+
         try:
-            return await self.db["cgc"]["api_keys"].find_one({
+            res = await self.db["cgc"]["api_keys"].find({
                 "access_level": "LLM",
-                "secret": hashlib.sha256(api_key.encode()).hexdigest(),
+                "secret": secret_hash,
                 "$or": [
                     {"date_expiry": None},
                     {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
                 ],
-            })
+            }).to_list(None)
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
 
+        return [{"id": x["_id"],"_user_id": x["user_id"], "secret": x["secret"],
+            "expires": x.get("date_expiry", None), "comment": x.get("comment")}
+            for x in res]
+
     async def event_create(self, user, time, product, quantity, request_id):
-        common = {"date_created": time, "user_id": user.get("user_id"),
-            "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
+        common = {"date_created": time, "user_id": user.get("_user_id"),
+            "api_key_id": str(user.get("id", "")), "request_id": str(request_id)}
 
         try:
             await self.db["billing"]["events_oneoff"].insert_one({
@@ -90,7 +97,14 @@ class SqliteDatabase:
         self.db = await aiosqlite.connect(path)
         logger.debug("Connected to database")
 
+        self.db.row_factory = self.dict_factory
+
         return self
+
+    @staticmethod
+    def dict_factory(cursor, row):
+        fields = [column[0] for column in cursor.description]
+        return {key: value for key, value in zip(fields, row)}
 
     async def close(self):
         await self.db.close()
@@ -111,31 +125,31 @@ class SqliteDatabase:
 
         return id_
 
-    async def user_get(self, api_key):
-        digest = hashlib.sha256(api_key.encode()).hexdigest()
-
+    async def user_list(self, secret_hash="", include_expired=False):
         try:
             cur = await self.db.execute("""
-                SELECT id FROM api_key WHERE type = 'LLM' AND secret = ?
-                    AND (expires > datetime() OR expires IS NULL)
-                """, (digest,))
+                SELECT id, secret, expires,
+                    CASE WHEN CURRENT_TIMESTAMP >= expires THEN 'expired'
+                        ELSE 'active' END AS status,
+                    IFNULL(comment, '') AS comment
+                FROM api_key
+                WHERE type = 'LLM' AND secret LIKE ? || '%'
+                    AND (? OR expires > datetime() OR expires IS NULL)
+                """, (secret_hash, include_expired))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 
-        row = await cur.fetchone()
-        if row is not None:
-            row = row[0]
-
+        rows = await cur.fetchall()
         await cur.close()
 
-        return row
+        return rows
 
     async def event_create(self, user, time, product, quantity, request_id):
         try:
             await self.db.execute("""
                 INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
                 VALUES (?, ?, ?, ?, ?)
-                """, (time, user, product, quantity, str(request_id)))
+                """, (time, user["id"], product, quantity, str(request_id)))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 

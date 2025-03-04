@@ -59,6 +59,43 @@ parser_user_create.add_argument("-t", "--comment",
 parser_user_create.set_defaults(func=command_user_create)
 
 
+# Command: user list
+
+async def command_user_list(args):
+    db = await get_db(uri=args.config["db"]["uri"])
+
+    fmt = "%(secret)-12.12s  %(expires)-20s  %(status)-7s  %(comment)s"
+    print(fmt % {"secret": "Hash", "expires": "Expires", "status": "Status",
+        "comment": "Comment"})
+    print(fmt % {"secret": "-" * 12, "expires": "-" * 20, "status": "-" * 7,
+        "comment": "-------"})
+
+    try:
+        users = await db.user_list(args.hash, include_expired=True)
+    except DatabaseError as e:
+        print("Database error:", e, file=sys.stderr)
+        sys.exit(1)
+
+    for user in users:
+        if user["expires"] is not None:
+            try:
+                user["expires"] = datetime.datetime.fromisoformat(user["expires"])\
+                    .astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                user["expires"] = "???"
+        else:
+            user["expires"] = "-"
+
+        print(fmt % user)
+
+    await db.close()
+
+parser_user_list = subparsers_user.add_parser("list")
+parser_user_list.add_argument("hash", nargs="?", default="",
+    help="hash prefix to use for filtering the list")
+parser_user_list.set_defaults(func=command_user_list)
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
     asyncio.run(args.func(args))
