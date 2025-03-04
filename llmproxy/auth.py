@@ -12,7 +12,7 @@ async def require_auth(req):
         raise aiohttp.web.HTTPUnauthorized(body="Unsupported authorization scheme")
 
     try:
-        user = await db.get_user(token)
+        user = await db.user_get(token)
     except pymongo.errors.PyMongoError as e:
         req.app.logger.critical(e)
         raise aiohttp.web.GracefulExit() from e

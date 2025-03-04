@@ -32,7 +32,7 @@ async def embeddings(f_req):
 
         db = await get_db(app["config"]["db"]["uri"], f_req)
         try:
-            await db.put_event(
+            await db.event_create(
                 user=user,
                 time=datetime.datetime.now(datetime.UTC),
                 product="%s/%s/embedding" % (b_name, b_cfg["device"]),

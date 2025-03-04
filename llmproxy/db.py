@@ -49,7 +49,7 @@ class MongoDatabase:
         self.db.close()
         logger.debug("Closed database connection")
 
-    async def get_user(self, api_key):
+    async def user_get(self, api_key):
         try:
             return await self.db["cgc"]["api_keys"].find_one({
                 "access_level": "LLM",
@@ -62,7 +62,7 @@ class MongoDatabase:
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
 
-    async def put_event(self, user, time, product, quantity, request_id):
+    async def event_create(self, user, time, product, quantity, request_id):
         common = {"date_created": time, "user_id": user.get("user_id"),
             "api_key_id": str(user.get("_id", "")), "request_id": str(request_id)}
 
@@ -92,7 +92,7 @@ class SqliteDatabase:
         await self.db.close()
         logger.debug("Closed database connection")
 
-    async def get_user(self, api_key):
+    async def user_get(self, api_key):
         digest = hashlib.sha256(api_key.encode()).hexdigest()
 
         try:
@@ -111,7 +111,7 @@ class SqliteDatabase:
 
         return row
 
-    async def put_event(self, user, time, product, quantity, request_id):
+    async def event_create(self, user, time, product, quantity, request_id):
         try:
             await self.db.execute("""
                 INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
