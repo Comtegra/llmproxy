@@ -11,7 +11,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import chat, config, embeddings
+from . import audio, chat, config, embeddings
 
 
 async def check_backends(app):
@@ -114,6 +114,7 @@ def main():
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
+        aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
     ])
 
     ssl_ctx = None
