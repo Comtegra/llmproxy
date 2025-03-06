@@ -31,6 +31,12 @@ pkill -f -HUP 'python3? .*llmproxy'
 docker kill -s=SIGHUP CONTAINER
 ```
 
+## Testing
+
+```sh
+python3 -m unittest
+```
+
 ## Deployment
 
 The following instructions assume that you already have a Docker compose
