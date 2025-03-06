@@ -13,7 +13,7 @@ async def request(f_req, body_transform=None):
         try:
             f_body = await f_req.json()
         except json.decoder.JSONDecodeError as e:
-            raise aiohttp.web.HTTPBadRequest(body="JSON decode error: %s" % e)
+            raise aiohttp.web.HTTPBadRequest(text="JSON decode error: %s" % e)
     elif f_req.content_type == "multipart/form-data":
         f_body = await f_req.post()
     else:
@@ -25,7 +25,7 @@ async def request(f_req, body_transform=None):
         b_name = f_body["model"]
         b_cfg = app["config"]["backends"][b_name]
     except KeyError:
-        raise aiohttp.web.HTTPUnauthorized(body="Incorrect model")
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect model")
 
     b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}

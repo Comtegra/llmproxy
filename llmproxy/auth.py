@@ -11,7 +11,7 @@ async def require_auth(req):
 
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
     if scheme != "Bearer":
-        raise aiohttp.web.HTTPUnauthorized(body="Unsupported authorization scheme")
+        raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
 
     digest = hashlib.sha256(token.encode()).hexdigest()
 
@@ -22,6 +22,6 @@ async def require_auth(req):
         raise aiohttp.web.GracefulExit() from e
 
     if not rows:
-        raise aiohttp.web.HTTPUnauthorized(body="Incorrect API key")
+        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
 
     return rows[0]
