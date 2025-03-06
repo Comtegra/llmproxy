@@ -8,7 +8,7 @@ from .db import DatabaseError, get_db
 
 
 def force_verbose(body):
-    if body["response_format"] not in ("json", "verbose_json"):
+    if body.get("response_format") not in (None, "json", "verbose_json"):
         raise aiohttp.web.HTTPUnprocessableEntity(
             body="response_format must be one of: json, verbose_json")
     body["response_format"] = "verbose_json"
