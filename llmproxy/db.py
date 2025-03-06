@@ -10,6 +10,8 @@ import pymongo.server_api
 
 logger = logging.getLogger(__name__)
 
+sqlite3.register_adapter(datetime.datetime, lambda d: d.isoformat())
+
 
 async def get_db(uri, req=None):
     if req is not None and "db" in req:
