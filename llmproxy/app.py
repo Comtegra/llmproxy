@@ -83,6 +83,22 @@ def reload_config(app):
         " ".join(app["config"]["backends"]))
 
 
+def create_app():
+    app = aiohttp.web.Application(
+        middlewares=[assign_request_id, add_cors_headers, close_db])
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+    app.add_routes([
+        aiohttp.web.post("/v1/chat/completions", chat.chat),
+        aiohttp.web.get("/v1/models", chat.models),
+        aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
+        aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+    ])
+
+    return app
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", type=pathlib.Path)
 
@@ -90,8 +106,7 @@ parser.add_argument("-c", "--config", type=pathlib.Path)
 def main():
     args = parser.parse_args()
 
-    app = aiohttp.web.Application(
-        middlewares=[assign_request_id, add_cors_headers, close_db])
+    app = create_app()
 
     try:
         app["config"] = config.load(args.config)
@@ -107,15 +122,6 @@ def main():
     if hasattr(signal, "SIGHUP"):
         loop.add_signal_handler(signal.SIGHUP,
             functools.partial(reload_config, app))
-
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
-    app.add_routes([
-        aiohttp.web.post("/v1/chat/completions", chat.chat),
-        aiohttp.web.get("/v1/models", chat.models),
-        aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
-        aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
-    ])
 
     ssl_ctx = None
     if (cert := app["config"].get("cert")) and (key := app["config"].get("key")):
