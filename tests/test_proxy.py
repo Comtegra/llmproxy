@@ -46,8 +46,7 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         await super().asyncTearDown()
 
     async def get_application(self):
-        app = create_app()
-        app["config"] = {
+        return await create_app({
             "timeout_connect": 1,
             "timeout_read": 1,
             "db": {"uri": "sqlite://%s" % self.db_path},
@@ -55,8 +54,7 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
                 {"url": "http://%s:%d" % (self.backend.host, self.backend.port),
                     "token": "mybackendtoken", "device": "none"},
             },
-        }
-        return app
+        })
 
     async def get_events(self):
         db = await get_db(self.app["config"]["db"]["uri"])

@@ -25,19 +25,6 @@ async def check_backends(app):
             logging.error("Backend %s not ready: %s", name, e)
 
 
-async def on_startup(app):
-    timeout = aiohttp.ClientTimeout(
-        connect=app["config"]["timeout_connect"],
-        sock_read=app["config"]["timeout_read"],
-    )
-    app["client"] = aiohttp.ClientSession(timeout=timeout)
-    await check_backends(app)
-
-
-async def on_cleanup(app):
-    await app["client"].close()
-
-
 @aiohttp.web.middleware
 async def assign_request_id(req, handler):
     req["request_id"] = uuid.uuid4()
@@ -83,18 +70,29 @@ def reload_config(app):
         " ".join(app["config"]["backends"]))
 
 
-def create_app():
+async def create_app(cfg):
     app = aiohttp.web.Application(
         middlewares=[assign_request_id, add_cors_headers, close_db])
 
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
     app.add_routes([
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
     ])
+
+    app["config"] = cfg
+
+    timeout = aiohttp.ClientTimeout(
+        connect=app["config"]["timeout_connect"],
+        sock_read=app["config"]["timeout_read"],
+    )
+    app["client"] = aiohttp.ClientSession(timeout=timeout)
+    async def client_close(app):
+        await app["client"].close()
+    app.on_cleanup.append(client_close)
+
+    await check_backends(app)
 
     return app
 
@@ -106,18 +104,18 @@ parser.add_argument("-c", "--config", type=pathlib.Path)
 def main():
     args = parser.parse_args()
 
-    app = create_app()
-
     try:
-        app["config"] = config.load(args.config)
+        cfg = config.load(args.config)
     except OSError as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
 
     log_fmt = "%(asctime)s %(levelname)s %(message)s"
-    logging.basicConfig(format=log_fmt, level=app["config"]["log_level"])
+    logging.basicConfig(format=log_fmt, level=cfg["log_level"])
 
     loop = asyncio.new_event_loop()
+
+    app = loop.run_until_complete(create_app(cfg))
 
     if hasattr(signal, "SIGHUP"):
         loop.add_signal_handler(signal.SIGHUP,
