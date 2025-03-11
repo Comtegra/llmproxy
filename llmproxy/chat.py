@@ -59,6 +59,11 @@ async def handle_resp_stream(f_req, b_res):
     return f_res, body["usage"]
 
 
+def force_include_usage(body):
+    if body.get("stream"):
+        body["stream_options"] = {"include_usage": True}
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 async def chat(f_req):
@@ -66,7 +71,7 @@ async def chat(f_req):
 
     user = await auth.require_auth(f_req)
 
-    b_req, b_name, b_cfg = await proxy.request(f_req)
+    b_req, b_name, b_cfg = await proxy.request(f_req, force_include_usage)
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 
