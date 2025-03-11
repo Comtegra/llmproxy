@@ -12,6 +12,14 @@ import aiohttp.web
 import yarl
 
 from . import audio, chat, config, embeddings
+from .db import get_db
+
+
+async def check_db(app):
+    db = await get_db(app["config"]["db"]["uri"])
+    await db.close()
+
+    logging.info("Database ready")
 
 
 async def check_backends(app):
@@ -83,6 +91,8 @@ async def create_app(cfg):
 
     app["config"] = cfg
 
+    await check_db(app)
+
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
         sock_read=app["config"]["timeout_read"],
@@ -115,7 +125,11 @@ def main():
 
     loop = asyncio.new_event_loop()
 
-    app = loop.run_until_complete(create_app(cfg))
+    try:
+        app = loop.run_until_complete(create_app(cfg))
+    except ImportError as e:
+        logging.critical("Failed to import module \"%s\"", e.name)
+        sys.exit(1)
 
     if hasattr(signal, "SIGHUP"):
         loop.add_signal_handler(signal.SIGHUP,
