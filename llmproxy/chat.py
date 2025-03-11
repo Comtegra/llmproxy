@@ -9,6 +9,17 @@ from . import auth, proxy
 from .db import DatabaseError, get_db
 
 
+async def readuntil(stream, separator: bytes = b"\n") -> bytes:
+    result = bytearray()
+    while not result.endswith(separator):
+        b = await stream.read(1)
+        if not b:
+            break
+        result += b
+
+    return result
+
+
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
     headers = {"Content-Type":
@@ -23,7 +34,7 @@ async def handle_resp_stream(f_req, b_res):
 
     try:
         await f_res.prepare(f_req)
-        while (c := await b_res.content.readuntil(b"\n\n")):
+        while (c := await readuntil(b_res.content, b"\n\n")):
             if c != b"data: [DONE]\n\n":
                 logging.debug("Received chunk: %s", c)
                 last = c
@@ -32,7 +43,7 @@ async def handle_resp_stream(f_req, b_res):
     except OSError as e:
         app.logger.info("Client disconnected: %s", e)
 
-    while (c := await b_res.content.readuntil(b"\n\n")):
+    while (c := await readuntil(b_res.content, b"\n\n")):
         if c != b"data: [DONE]\n\n":
             logging.debug("Received chunk after client disconnected: %s", c)
             last = c
