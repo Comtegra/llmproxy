@@ -4,9 +4,6 @@ import logging
 import sqlite3
 import uuid
 
-import aiosqlite
-import motor.motor_asyncio
-import pymongo.server_api
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +34,9 @@ class DatabaseError(Exception):
 class MongoDatabase:
     @classmethod
     async def create(cls, uri):
+        import motor.motor_asyncio
+        import pymongo.server_api
+
         self = cls()
 
         self.db = motor.motor_asyncio.AsyncIOMotorClient(uri,
@@ -95,6 +95,8 @@ class MongoDatabase:
 class SqliteDatabase:
     @classmethod
     async def create(cls, uri):
+        import aiosqlite
+
         path = uri.removeprefix("sqlite://")
         assert path != uri
 
