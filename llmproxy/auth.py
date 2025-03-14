@@ -1,9 +1,8 @@
 import hashlib
 
 import aiohttp.web
-import pymongo.errors
 
-from .db import get_db
+from .db import DatabaseError, get_db
 
 
 async def require_auth(req):
@@ -17,7 +16,7 @@ async def require_auth(req):
 
     try:
         rows = await db.user_list(digest)
-    except pymongo.errors.PyMongoError as e:
+    except DatabaseError as e:
         req.app.logger.critical(e)
         raise aiohttp.web.GracefulExit() from e
 

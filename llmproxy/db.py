@@ -35,6 +35,7 @@ class MongoDatabase:
     @classmethod
     async def create(cls, uri):
         import motor.motor_asyncio
+        import pymongo.errors
         import pymongo.server_api
 
         self = cls()
