@@ -23,7 +23,7 @@ async def request(f_req, body_transform=None):
 
     try:
         b_name = f_body["model"]
-        b_cfg = app["config"]["backends"][b_name]
+        b_cfg = app["config"].get("backends", {})[b_name]
     except KeyError:
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect model")
 

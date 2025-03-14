@@ -23,7 +23,7 @@ async def check_db(app):
 
 
 async def check_backends(app):
-    for name, cfg in app["config"]["backends"].items():
+    for name, cfg in app["config"].get("backends", {}).items():
         try:
             ssl = None if cfg.get("verify_ssl", True) else False
             await app["client"].get(yarl.URL(cfg["url"]) / "health", ssl=ssl,
@@ -73,9 +73,9 @@ def reload_config(app):
         return
 
     # Only backends are reloaded
-    app["config"]["backends"] = cfg["backends"]
+    app["config"]["backends"] = cfg.get("backends", {})
     app.logger.info("Config reloaded. Configured backends: %s",
-        " ".join(app["config"]["backends"]))
+        " ".join(app["config"]["backends"]) or "none")
 
 
 async def create_app(cfg):

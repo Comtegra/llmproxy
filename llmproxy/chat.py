@@ -125,7 +125,7 @@ async def models(req):
         "data": [
             {"id": model, "object": "model", "created": None, "owned_by": None,
                 "device": meta.get("device")}
-            for model, meta in req.app["config"]["backends"].items()
+            for model, meta in req.app["config"].get("backends", {}).items()
         ],
     }
 
