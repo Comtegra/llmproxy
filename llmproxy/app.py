@@ -84,6 +84,7 @@ async def create_app(cfg):
 
     app.add_routes([
         aiohttp.web.post("/v1/chat/completions", chat.chat),
+        aiohttp.web.post("/v1/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
