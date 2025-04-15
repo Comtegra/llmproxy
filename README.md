@@ -37,6 +37,14 @@ docker kill -s=SIGHUP CONTAINER
 python3 -m unittest
 ```
 
+## Building the image
+
+To build the Docker image, run the following command:
+
+```sh
+docker build -t registry.comtegra.pl/comtegra/llm-billing-proxy:latest .
+```
+
 ## Deployment
 
 The following instructions assume that you already have a Docker compose
