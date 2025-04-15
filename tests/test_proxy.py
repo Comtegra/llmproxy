@@ -23,21 +23,6 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         self.backend = aiohttp.test_utils.TestServer(mockbackend.create_app())
         await self.backend.start_server()
 
-        # Initialize DB
-        self.db_fd, self.db_path = tempfile.mkstemp()
-        con = sqlite3.connect(self.db_path)
-        schema = importlib.resources.files("llmproxy").joinpath("schema.sql")
-        con.executescript(schema.read_text())
-
-        # Insert test user
-        secret = hashlib.sha256("mytoken".encode()).hexdigest()
-        con.execute("""
-            INSERT INTO api_key (id, secret, type) VALUES ('myuser', ?, 'LLM')
-            """, (secret,))
-
-        con.commit()
-        con.close()
-
         await super().asyncSetUp()
 
     async def asyncTearDown(self):
@@ -46,7 +31,9 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         await super().asyncTearDown()
 
     async def get_application(self):
-        return await create_app({
+        self.db_fd, self.db_path = tempfile.mkstemp()
+
+        app = await create_app({
             "timeout_connect": 1,
             "timeout_read": 1,
             "db": {"uri": "sqlite://%s" % self.db_path},
@@ -55,6 +42,17 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
                     "token": "mybackendtoken", "device": "none"},
             },
         })
+
+        # Insert test user
+        secret = hashlib.sha256("mytoken".encode()).hexdigest()
+        db = await get_db(app["config"]["db"]["uri"])
+        await db.db.execute("""
+            INSERT INTO api_key (id, secret, type) VALUES ('myuser', ?, 'LLM')
+            """, (secret,))
+        await db.db.commit()
+        await db.close()
+
+        return app
 
     async def get_events(self):
         db = await get_db(self.app["config"]["db"]["uri"])
