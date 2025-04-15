@@ -110,13 +110,14 @@ async def create_app(cfg):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", type=pathlib.Path)
+parser.add_argument("--create-config", action="store_true")
 
 
 def main():
     args = parser.parse_args()
 
     try:
-        cfg = config.load(args.config)
+        cfg = config.load(args.config, args.create_config)
     except OSError as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)

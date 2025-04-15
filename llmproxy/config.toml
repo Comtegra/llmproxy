@@ -1,0 +1,33 @@
+# Logging level (CRITICAL, ERROR, WARNING, INFO or DEBUG)
+log_level = "INFO"
+
+# Listening address
+host = "0.0.0.0"
+port = 8080
+
+# Backend timeouts
+timeout_connect = 5  # connection timeout
+timeout_read = 60  # response timeout
+
+# Allowed HTTP origins
+# This value will be sent in the Access-Control-Allow-Origin response header.
+http_origin = "*"
+
+[db]
+
+# Database URI
+# Absolute (e.g. sqlite:///media/api/db.sqlite) or relative (e.g. sqlite://db.sqlite) URL.
+# The only supported URL schemas are sqlite and mongodb.
+uri = "sqlite://db.sqlite"
+
+# Backend definitions
+# One backend corresponds to one model (retrievable through /v1/models).
+
+#[backends.mybackend1]
+#url = "https://mybackend1.mynamespace.cgc-waw-01.comtegra.cloud"
+#token = "mytoken1"
+#device = "a5000"  # name of the GPU this model runs on
+#model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
+#verify_ssl = true  # optional, set to false to skip certificate verification
+
+# Add more backends here
