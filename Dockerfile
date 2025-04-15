@@ -17,6 +17,7 @@ RUN pip install --break-system-packages motor==3.5.0
 
 WORKDIR /root/llmproxy
 COPY scripts scripts
+COPY MANIFEST.in .
 COPY pyproject.toml .
 COPY llmproxy llmproxy
 
