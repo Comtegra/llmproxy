@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import importlib.resources
 import logging
 import sqlite3
 import uuid
@@ -104,6 +105,15 @@ class SqliteDatabase:
         self = cls()
         self.db = await aiosqlite.connect(path)
         logger.debug("Connected to database")
+
+        cur = await self.db.execute("PRAGMA user_version")
+        ver, = await cur.fetchone()
+        if ver == 0:
+            schema = importlib.resources.files("llmproxy") \
+                .joinpath("schema.sql").read_text()
+            await self.db.executescript(schema)
+            await self.db.execute("PRAGMA user_version = 1")
+            logger.info("Initialized database to version 1")
 
         self.db.row_factory = self.dict_factory
 
