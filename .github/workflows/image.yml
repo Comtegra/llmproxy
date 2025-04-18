@@ -1,0 +1,9 @@
+on: [push]
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      options: "--entrypoint ''"
+    steps:
+      - run: /kaniko/executor --context "." --dockerfile "./Dockerfile" --destination "ghcr.io/Comtegra/llmproxy:${{ github.ref_name }}"
