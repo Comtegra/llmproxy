@@ -20,7 +20,7 @@ python3 -m llmproxy
 
 ## Configuration
 
-See [config.toml](config.toml) for an example configuration file.
+See [llmproxy/config.toml](llmproxy/config.toml) for an example configuration file.
 The program will update the list of configured backends from the config file
 on SIGHUP.
 
@@ -59,8 +59,8 @@ repository and file.
 sqlite3 db.sqlite < llmproxy/schema.sql
 ```
 
-2. Copy [config.toml](config.toml) to your repository. A good relative path
-would be `secrets/llm-billing-proxy-config.toml`.
+2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
+relative path would be `secrets/llm-billing-proxy-config.toml`.
 3. Add appropriate entries to your compose file's `services` and `secrets`
 sections. There's a template [compose.yml](compose.yml) in this repository.
 4. Bring the new service up and verify it started correctly
@@ -72,8 +72,8 @@ sections. There's a template [compose.yml](compose.yml) in this repository.
 [Database](#database) below for JS snippets):
   * `{resource: {db: "cgc", collection: "api_keys"}, actions: ["find"]}`
   * `{resource: {db: "billing", collection: "events_oneoff"}, actions: ["insert"]}`
-2. Copy [config.toml](config.toml) to your repository. A good relative path
-would be `secrets/llm-billing-proxy-config.toml`.
+2. Copy [llmproxy/config.toml](llmproxy/config.toml) to your repository. A good
+relative path would be `secrets/llm-billing-proxy-config.toml`.
 3. In the config edit `uri` in section `db` so that it includes credentials for
 the Mongo user (e.g. `mongodb://myuser:mypass@host:27017/?authSource=cgc`).
 4. Add appropriate entries to your compose file's `services` and `secrets`
