@@ -4,6 +4,5 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: gcr.io/kaniko-project/executor:v1.23.2-debug
-      options: "--entrypoint ''"
     steps:
-      - run: /kaniko/executor --context "${{ github.workspace }}" --dockerfile "Dockerfile" --destination "ghcr.io/Comtegra/llmproxy:${{ github.ref_name }}"
+      - run: "pwd && ls-la"
