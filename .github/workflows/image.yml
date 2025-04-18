@@ -5,4 +5,4 @@ jobs:
     container:
       image: gcr.io/kaniko-project/executor:v1.23.2-debug
     steps:
-      - run: "pwd && ls-la"
+      - run: "pwd && ls -la"
