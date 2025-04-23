@@ -80,9 +80,9 @@ async def chat(f_req):
     app.logger.debug("Frontend request body:\n%s", f_body)
 
     b_name = f_body.get("model")
+    b_cfg = proxy.get_backend_cfg(app, b_name)
 
-    b_req, b_cfg = await proxy.request(f_req, b_name, "v1/chat/completions",
-        f_body)
+    b_req = await proxy.request(f_req, b_cfg, "v1/chat/completions", f_body)
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 

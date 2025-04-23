@@ -4,20 +4,22 @@ import aiohttp
 import yarl
 
 
-# Frontend related variables are prefixed with f_.
-# Backend related variables are prefixed with b_.
-async def request(f_req, b_name, url, body):
-    app = f_req.app
-
+def get_backend_cfg(app, name):
     try:
-        b_cfg = app["config"].get("backends", {})[b_name]
+        return app["config"].get("backends", {})[name]
     except KeyError:
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect model")
 
-    b_url = yarl.URL(b_cfg["url"]) / url
-    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
-    if (m := b_cfg.get("model")) is not None and "model" in body:
+# Frontend related variables are prefixed with f_.
+# Backend related variables are prefixed with b_.
+async def request(f_req, backend_cfg, url, body):
+    app = f_req.app
+
+    b_url = yarl.URL(backend_cfg["url"]) / url
+    b_hdrs = {"Authorization": "Bearer %s" % backend_cfg["token"]}
+
+    if (m := backend_cfg.get("model")) is not None and "model" in body:
         body = {**body, "model": m}
 
     if f_req.content_type == "application/json":
@@ -36,9 +38,8 @@ async def request(f_req, b_name, url, body):
 
     try:
         app.logger.debug("Sending backend request")
-        ssl = None if b_cfg.get("verify_ssl", True) else False
-        return (app["client"].post(b_url, headers=b_hdrs, data=body, ssl=ssl),
-            b_cfg)
+        ssl = None if backend_cfg.get("verify_ssl", True) else False
+        return app["client"].post(b_url, headers=b_hdrs, data=body, ssl=ssl)
     except aiohttp.ServerTimeoutError as e:
         app.logger.error("Backend timeout: %s", e)
         raise aiohttp.web.HTTPGatewayTimeout() from e
