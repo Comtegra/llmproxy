@@ -29,7 +29,8 @@ async def transcriptions(f_req):
     b_name = f_body.get("model")
     b_cfg = proxy.get_backend_cfg(app, b_name)
 
-    b_req = await proxy.request(f_req, b_cfg, "v1/audio/transcriptions", f_body)
+    b_req = await proxy.request(app, b_cfg, "v1/audio/transcriptions",
+        "multipart/form-data")
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 
