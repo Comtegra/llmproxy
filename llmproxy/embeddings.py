@@ -14,7 +14,20 @@ async def embeddings(f_req):
 
     user = await auth.require_auth(f_req)
 
-    b_req, b_name, b_cfg = await proxy.request(f_req)
+    if f_req.content_type != "application/json":
+        raise aiohttp.web.HTTPUnsupportedMediaType()
+
+    try:
+        f_body = await f_req.json()
+    except json.decoder.JSONDecodeError as e:
+        raise aiohttp.web.HTTPBadRequest(text="JSON decode error: %s" % e)
+
+    app.logger.debug("Frontend request body:\n%s", f_body)
+
+    b_name = f_body.get("model")
+
+    b_req, b_name, b_cfg = await proxy.request(f_req, b_name, "v1/embeddings",
+        f_body)
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 

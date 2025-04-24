@@ -7,13 +7,6 @@ from . import auth, proxy
 from .db import DatabaseError, get_db
 
 
-def force_verbose(body):
-    if body.get("response_format") not in (None, "json", "verbose_json"):
-        raise aiohttp.web.HTTPUnprocessableEntity(
-            text="response_format must be one of: json, verbose_json")
-    body["response_format"] = "verbose_json"
-
-
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 async def transcriptions(f_req):
@@ -21,7 +14,22 @@ async def transcriptions(f_req):
 
     user = await auth.require_auth(f_req)
 
-    b_req, b_name, b_cfg = await proxy.request(f_req, force_verbose)
+    if f_req.content_type != "multipart/form-data":
+        raise aiohttp.web.HTTPUnsupportedMediaType()
+
+    f_body = await f_req.post()
+
+    if f_body.get("response_format") not in (None, "json", "verbose_json"):
+        raise aiohttp.web.HTTPUnprocessableEntity(
+            text="response_format must be one of: json, verbose_json")
+    f_body["response_format"] = "verbose_json"
+
+    app.logger.debug("Frontend request body:\n%s", f_body)
+
+    b_name = f_body.get("model")
+
+    b_req, b_cfg = await proxy.request(f_req, b_name, "v1/audio/transcriptions",
+        f_body)
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 
