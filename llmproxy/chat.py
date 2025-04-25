@@ -64,14 +64,14 @@ async def handle_resp(f_req, b_res):
 
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
-    headers = {"Content-Type":
-        b_res.headers.get("Content-Type", "application/octet-stream")}
-    f_res = aiohttp.web.StreamResponse(headers=headers)
 
-    f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    if o := app["config"].get("http_origin"):
-        f_res.headers["Access-Control-Allow-Origin"] = o
+    hdrs = {
+        "Content-Type": "text/event-stream",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Origin": app["config"].get("http_origin", ""),
+    }
 
+    f_res = aiohttp.web.StreamResponse(headers=hdrs)
     tokens = 0
 
     try:
