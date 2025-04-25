@@ -76,8 +76,8 @@ class TestChat(LLMProxyAppTestCase):
         self.assertEqual(data["choices"][0]["message"]["content"], "you said: hi")
 
         self.assertListEqual(await self.get_events(), [
-            {"product": "mymodel/none/prompt", "quantity": 1},
-            {"product": "mymodel/none/completion", "quantity": 2},
+            {"product": "mymodel/none/prompt", "quantity": 2},
+            {"product": "mymodel/none/completion", "quantity": 3},
         ])
 
     async def test_unknown_token(self):

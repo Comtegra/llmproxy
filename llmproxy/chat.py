@@ -1,6 +1,6 @@
 import datetime
+import io
 import json
-import logging
 
 import aiohttp
 import aiohttp.web
@@ -20,6 +20,48 @@ async def readuntil(stream, separator: bytes = b"\n") -> bytes:
     return result
 
 
+async def handle_resp(f_req, b_res):
+    app = f_req.app
+    buf = io.StringIO()
+    tokens = 0
+    data = {}
+
+    while True:
+        if f_req.transport is None:
+            b_res.close()
+            app.logger.info("Client disconnected")
+            break
+
+        chunk = await readuntil(b_res.content, b"\n\n")
+        if chunk == b"":
+            break
+        assert chunk.startswith(b"data: ")
+        raw = chunk.removeprefix(b"data: ")
+        if raw == b"[DONE]\n\n":
+            continue
+        data = json.loads(raw)
+        assert len(data["choices"]) == 1
+        content = data["choices"][0]["delta"].get("content")
+        if content is not None:
+            buf.write(content)
+            app.logger.debug("Token: %r", content)
+            tokens += 1
+
+    hdrs = {
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Origin": app["config"].get("http_origin", ""),
+    }
+
+    if data:
+        data["object"] = "chat.completion"
+        assert len(data["choices"]) == 1
+        del data["choices"][0]["delta"]
+        data["choices"][0]["message"] = {"role": "assistant",
+            "content": buf.getvalue()}
+
+    return aiohttp.web.json_response(data, headers=hdrs), tokens
+
+
 async def handle_resp_stream(f_req, b_res):
     app = f_req.app
     headers = {"Content-Type":
@@ -30,33 +72,28 @@ async def handle_resp_stream(f_req, b_res):
     if o := app["config"].get("http_origin"):
         f_res.headers["Access-Control-Allow-Origin"] = o
 
-    last = b""
+    tokens = 0
 
     try:
         await f_res.prepare(f_req)
-        while (c := await readuntil(b_res.content, b"\n\n")):
-            if c != b"data: [DONE]\n\n":
-                logging.debug("Received chunk: %s", c)
-                last = c
-            await f_res.write(c)
+
+        while True:
+            chunk = await readuntil(b_res.content, b"\n\n")
+            if chunk == b"":
+                break
+            await f_res.write(chunk)
+            app.logger.debug("Chunk: %r", chunk)
+            tokens += 1
+
         await f_res.write_eof()
+
+        # Last 2 chunks contain no tokens (usage -> [DONE])
+        tokens -= 2
     except OSError as e:
+        b_res.close()
         app.logger.info("Client disconnected: %s", e)
 
-    while (c := await readuntil(b_res.content, b"\n\n")):
-        if c != b"data: [DONE]\n\n":
-            logging.debug("Received chunk after client disconnected: %s", c)
-            last = c
-
-    _, _, body_raw = last.partition(b" ")
-
-    try:
-        body = json.loads(body_raw)
-    except json.decoder.JSONDecodeError:
-        app.logger.error("Failed parsing usage information: %s", body_raw)
-        raise
-
-    return f_res, body["usage"]
+    return f_res, tokens
 
 
 # Frontend related variables are prefixed with f_.
@@ -74,13 +111,25 @@ async def chat(f_req):
     except json.decoder.JSONDecodeError as e:
         raise aiohttp.web.HTTPBadRequest(text="JSON decode error: %s" % e)
 
-    if f_body.get("stream"):
-        f_body["stream_options"] = {"include_usage": True}
+    stream = f_body.get("stream", False)
+
+    f_body["stream"] = True
+    if "stream_options" not in f_body:
+        f_body["stream_options"] = {}
+    f_body["stream_options"]["include_usage"] = True
 
     app.logger.debug("Frontend request body:\n%s", f_body)
 
     b_name = f_body.get("model")
     b_cfg = proxy.get_backend_cfg(app, b_name)
+
+    async with proxy.request(app, b_cfg, "apply-template", f_body) as prompt_res:
+        prompt = (await prompt_res.json())["prompt"]
+        app.logger.debug("Prompt: %s", prompt)
+
+    tok_body = {"content": prompt, "add_special": True}
+    async with proxy.request(app, b_cfg, "tokenize", tok_body) as tokens_res:
+        tok_prompt = len((await tokens_res.json())["tokens"])
 
     async with proxy.request(app, b_cfg, "v1/chat/completions", f_body) as b_res:
         app.logger.debug("Backend request completed")
@@ -90,15 +139,10 @@ async def chat(f_req):
                 b_res.status, (await b_res.text()))
             raise aiohttp.web.HTTPBadGateway()
 
-        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
-            f_res, usage = await handle_resp_stream(f_req, b_res)
+        if stream:
+            f_res, tok_compl = await handle_resp_stream(f_req, b_res)
         else:
-            body = await b_res.content.read()
-            data = json.loads(body)
-            f_hdrs = {"Content-Type":
-                b_res.headers.get("Content-Type", "application/octet-stream")}
-            f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
-            usage = data["usage"]
+            f_res, tok_compl = await handle_resp(f_req, b_res)
 
         db = await get_db(app["config"]["db"]["uri"], f_req)
         try:
@@ -106,14 +150,14 @@ async def chat(f_req):
                 user=user,
                 time=datetime.datetime.now(datetime.UTC),
                 product="%s/%s/prompt" % (b_name, b_cfg["device"]),
-                quantity=usage["prompt_tokens"],
+                quantity=tok_prompt,
                 request_id=f_req["request_id"],
             )
             await db.event_create(
                 user=user,
                 time=datetime.datetime.now(datetime.UTC),
                 product="%s/%s/completion" % (b_name, b_cfg["device"]),
-                quantity=usage["completion_tokens"],
+                quantity=tok_compl,
                 request_id=f_req["request_id"],
             )
         except DatabaseError as e:
@@ -121,8 +165,7 @@ async def chat(f_req):
             raise aiohttp.web.GracefulExit() from e
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
-            usage["prompt_tokens"], usage["completion_tokens"],
-            b_name)
+            tok_prompt, tok_compl, b_name)
 
         return f_res
 
