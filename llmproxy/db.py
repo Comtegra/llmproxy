@@ -58,6 +58,8 @@ class MongoDatabase:
         raise NotImplementedError("not implemented for MongoDB")
 
     async def user_list(self, secret_hash="", include_expired=False):
+        import pymongo.errors
+
         if include_expired:
             raise NotImplementedError("not implemented for MongoDB")
 
@@ -81,6 +83,8 @@ class MongoDatabase:
         raise NotImplementedError("not implemented for MongoDB")
 
     async def event_create(self, user, time, product, quantity, request_id):
+        import pymongo.errors
+
         common = {"date_created": time, "user_id": user.get("_user_id"),
             "api_key_id": str(user.get("id", "")), "request_id": str(request_id)}
 
