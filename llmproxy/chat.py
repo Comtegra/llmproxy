@@ -1,4 +1,5 @@
 import datetime
+import decimal
 import json
 import logging
 
@@ -51,7 +52,7 @@ async def handle_resp_stream(f_req, b_res):
     _, _, body_raw = last.partition(b" ")
 
     try:
-        body = json.loads(body_raw)
+        body = json.loads(body_raw, parse_float=decimal.Decimal)
     except json.decoder.JSONDecodeError:
         app.logger.error("Failed parsing usage information: %s", body_raw)
         raise
@@ -84,26 +85,24 @@ async def chat(f_req):
             f_res, usage = await handle_resp_stream(f_req, b_res)
         else:
             body = await b_res.content.read()
-            data = json.loads(body)
+            data = json.loads(body, parse_float=decimal.Decimal)
             f_hdrs = {"Content-Type":
                 b_res.headers.get("Content-Type", "application/octet-stream")}
             f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
             usage = data["usage"]
 
         db = await get_db(app["config"]["db"]["uri"], f_req)
+        res = {
+            "%s/%s/prompt" % (b_name, b_cfg["device"]):
+                usage["prompt_tokens"],
+            "%s/%s/completion" % (b_name, b_cfg["device"]):
+                usage["completion_tokens"],
+        }
         try:
-            await db.event_create(
+            await db.billing_record_add(
                 user=user,
                 time=datetime.datetime.now(datetime.UTC),
-                product="%s/%s/prompt" % (b_name, b_cfg["device"]),
-                quantity=usage["prompt_tokens"],
-                request_id=f_req["request_id"],
-            )
-            await db.event_create(
-                user=user,
-                time=datetime.datetime.now(datetime.UTC),
-                product="%s/%s/completion" % (b_name, b_cfg["device"]),
-                quantity=usage["completion_tokens"],
+                resources=res,
                 request_id=f_req["request_id"],
             )
         except DatabaseError as e:

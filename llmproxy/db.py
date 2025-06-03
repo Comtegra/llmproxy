@@ -1,14 +1,15 @@
 import datetime
+import decimal
 import hashlib
 import importlib.resources
 import logging
 import sqlite3
 import uuid
 
-
 logger = logging.getLogger(__name__)
 
 sqlite3.register_adapter(datetime.datetime, lambda d: d.isoformat())
+sqlite3.register_adapter(decimal.Decimal, float)
 
 
 async def get_db(uri, req=None):
@@ -35,15 +36,36 @@ class DatabaseError(Exception):
 class MongoDatabase:
     @classmethod
     async def create(cls, uri):
+        import bson
         import motor.motor_asyncio
         import pymongo.errors
         import pymongo.server_api
+
+        class DecimalCodec(bson.codec_options.TypeCodec):
+            python_type = decimal.Decimal
+            bson_type = bson.decimal128.Decimal128
+
+            def transform_python(self, value):
+                # If the decimal can be represented by an exact integer, use it
+                with decimal.localcontext() as ctx:
+                    ctx.clear_flags()
+                    i = value.to_integral_exact(context=ctx)
+                    if not ctx.flags[decimal.Inexact]:
+                        return int(i)
+
+                return bson.decimal128.Decimal128(value)
+
+            def transform_bson(self, value):
+                return value.to_decimal()
 
         self = cls()
 
         self.db = motor.motor_asyncio.AsyncIOMotorClient(uri,
             tz_aware=True, connect=True,
             server_api=pymongo.server_api.ServerApi('1'))
+
+        treg = bson.codec_options.TypeRegistry([DecimalCodec()])
+        self.copt = bson.codec_options.CodecOptions(type_registry=treg)
 
         await self.db.admin.command("ping")
         logger.debug("Connected to database")
@@ -60,39 +82,66 @@ class MongoDatabase:
     async def user_list(self, secret_hash="", include_expired=False):
         import pymongo.errors
 
+        if secret_hash == "":
+            raise NotImplementedError("not implemented for MongoDB")
         if include_expired:
             raise NotImplementedError("not implemented for MongoDB")
 
         try:
-            res = await self.db["cgc"]["api_keys"].find({
+            key = await self.db["cgc"]["api_keys"].find_one({
                 "access_level": "LLM",
                 "secret": secret_hash,
                 "$or": [
                     {"date_expiry": None},
                     {"date_expiry": {"$gt": datetime.datetime.now(datetime.UTC)}},
                 ],
-            }).to_list(None)
+            })
+            if key is None:
+                return []
+
+            user = await self.db["cgc"]["rest_users"].find_one(
+                {"_id": key["user_id"]})
+            if user is None:
+                return []
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
 
-        return [{"id": x["_id"],"_user_id": x["user_id"], "secret": x["secret"],
-            "expires": x.get("date_expiry", None), "comment": x.get("comment")}
-            for x in res]
+        return [{
+            "id": key["_id"],
+            "_user_id": key["user_id"],
+            "_namespace": user["namespace"],
+            "_org_id": str(user.get("_org_id", "")),
+            "_tier": user.get("_subscription_level", ""),
+            "secret": key["secret"],
+            "expires": key.get("date_expiry", None),
+            "comment": key.get("comment"),
+        }]
 
     async def user_update(self, user, **kwargs):
         raise NotImplementedError("not implemented for MongoDB")
 
-    async def event_create(self, user, time, product, quantity, request_id):
+    async def billing_record_add(self, user, time, resources, request_id):
         import pymongo.errors
 
-        common = {"date_created": time, "user_id": user.get("_user_id"),
-            "api_key_id": str(user.get("id", "")), "request_id": str(request_id)}
+        col = self.db["cgc"].get_collection("billing_record",
+            codec_options=self.copt)
 
         try:
-            await self.db["billing"]["events_oneoff"].insert_one({
-                **common,
-                "product": product,
-                "quantity": quantity,
+            await col.insert_one({
+                "cluster_id": None,
+                "namespace": user["_namespace"],
+                "name": "",
+                "revision": 1,
+                "created_at": time,
+                "deleted_at": None,
+                "resources": resources,
+                "type": "oneoff",
+                "k8s_uid": None,
+                "user_id": user["_user_id"],
+                "api_key_id": user["id"],
+                "org_id": user["_org_id"],
+                "tier": user["_tier"],
+                "revision_synced": None,
             })
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
@@ -182,12 +231,14 @@ class SqliteDatabase:
 
         await self.db.commit()
 
-    async def event_create(self, user, time, product, quantity, request_id):
+    async def billing_record_add(self, user, time, resources, request_id):
         try:
-            await self.db.execute("""
-                INSERT INTO event_oneoff (created, api_key, product, quantity, rid)
-                VALUES (?, ?, ?, ?, ?)
-                """, (time, user["id"], product, quantity, str(request_id)))
+            for name, quant in resources.items():
+                await self.db.execute("""
+                    INSERT INTO event_oneoff
+                        (created, api_key, product, quantity, rid)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, (time, user["id"], name, quant, str(request_id)))
         except sqlite3.DatabaseError as e:
             raise DatabaseError(e) from e
 
