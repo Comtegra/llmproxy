@@ -1,4 +1,5 @@
 import datetime
+import decimal
 import json
 
 import aiohttp
@@ -31,18 +32,19 @@ async def transcriptions(f_req):
             raise aiohttp.web.HTTPBadGateway()
 
         body = await b_res.content.read()
-        data = json.loads(body)
+        data = json.loads(body, parse_float=decimal.Decimal)
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/octet-stream")}
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         db = await get_db(app["config"]["db"]["uri"], f_req)
+        res = {"%s/%s/transcription" % (b_name, b_cfg["device"]):
+            data["duration"]}
         try:
-            await db.event_create(
+            await db.billing_record_add(
                 user=user,
                 time=datetime.datetime.now(datetime.UTC),
-                product="%s/%s/transcription" % (b_name, b_cfg["device"]),
-                quantity=data["duration"],
+                resources=res,
                 request_id=f_req["request_id"],
             )
         except DatabaseError as e:
