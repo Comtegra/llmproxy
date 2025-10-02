@@ -30,4 +30,12 @@ def load(path=None, create=False):
             cfg = tomllib.load(f)
             print("Loaded config from \"%s\"" % p, file=sys.stderr)
             cfg["_path"] = p
-            return cfg
+
+        if db_uri := os.environ.get("LLMPROXY_DB_URI"):
+            if "db" not in cfg:
+                cfg["db"] = {}
+            cfg["db"]["uri"] = db_uri
+            print("Loaded database URI from the LLMPROXY_DB_URI env var",
+                file=sys.stderr)
+
+        return cfg

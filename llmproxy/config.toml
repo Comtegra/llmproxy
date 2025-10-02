@@ -18,6 +18,7 @@ http_origin = "*"
 # Database URI
 # Absolute (e.g. sqlite:///media/api/db.sqlite) or relative (e.g. sqlite://db.sqlite) URL.
 # The only supported URL schemas are sqlite and mongodb.
+# May be overriden via LLMPROXY_DB_URI environment variable.
 uri = "sqlite://db.sqlite"
 
 # Backend definitions
