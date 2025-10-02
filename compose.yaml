@@ -1,6 +1,6 @@
 services:
   llm-billing-proxy:
-    image: registry.comtegra.pl/comtegra/llm-billing-proxy:latest  # set a specific version here
+    image: ghcr.io/comtegra/llmproxy:master  # set a specific version here
     command: "-c /run/secrets/llm-billing-proxy-config.toml"
     secrets:
       - llm-billing-proxy-config.toml

@@ -42,7 +42,7 @@ python3 -m unittest
 To build the Docker image, run the following command:
 
 ```sh
-docker build -t registry.comtegra.pl/comtegra/llm-billing-proxy:latest .
+docker build -t ghcr.io/comtegra/llmproxy:master .
 ```
 
 ## Deployment
