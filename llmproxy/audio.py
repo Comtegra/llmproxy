@@ -26,10 +26,7 @@ async def transcriptions(f_req):
     async with b_req as b_res:
         app.logger.debug("Backend request completed")
 
-        if b_res.status != 200:
-            app.logger.error("Backend \"%s\" error: %d %s", b_name,
-                b_res.status, (await b_res.text()))
-            raise aiohttp.web.HTTPBadGateway()
+        await proxy.check_response(app, b_name, b_res)
 
         body = await b_res.content.read()
         data = json.loads(body, parse_float=decimal.Decimal)
