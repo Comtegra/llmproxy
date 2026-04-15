@@ -99,3 +99,51 @@ class TestChat(LLMProxyAppTestCase):
             self.assertEqual(res.status, 401)
 
         self.assertListEqual(await self.get_events(), [])
+
+    async def test_4xx_forwarded(self):
+        body = {"model": "mymodel", "_trigger_error": 400,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 400)
+            data = await res.json()
+            self.assertEqual(data["error"]["message"], "Input too long")
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_422_forwarded(self):
+        body = {"model": "mymodel", "_trigger_error": 422,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 422)
+            data = await res.json()
+            self.assertEqual(data["error"]["message"], "Context length exceeded")
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_unexpected_2xx_masked(self):
+        body = {"model": "mymodel", "_trigger_error": 201,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 502)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_5xx_masked(self):
+        body = {"model": "mymodel", "_trigger_error": 500,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 502)
+
+        self.assertListEqual(await self.get_events(), [])

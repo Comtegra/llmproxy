@@ -11,6 +11,26 @@ async def chat(req):
     if b["model"] != "mymodel":
         raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
 
+    if (err := b.get("_trigger_error")) is not None:
+        if err == 201:
+            return aiohttp.web.json_response(
+                {"unexpected": "created"},
+                status=201)
+        if err == 400:
+            return aiohttp.web.json_response(
+                {"error": {"message": "Input too long",
+                    "type": "invalid_request_error"}},
+                status=400)
+        if err == 422:
+            return aiohttp.web.json_response(
+                {"error": {"message": "Context length exceeded",
+                    "type": "invalid_request_error"}},
+                status=422)
+        if err == 500:
+            return aiohttp.web.json_response(
+                {"error": {"message": "Internal server error"}},
+                status=500)
+
     msg = b["messages"][0]["content"]
 
     return aiohttp.web.json_response({

@@ -67,3 +67,27 @@ async def request(f_req, body_transform=None):
     except aiohttp.ClientError as e:
         app.logger.error("HTTP client error: %s", e)
         raise aiohttp.web.HTTPInternalServerError() from e
+
+
+async def check_response(app, b_name, b_res, expected_status=200):
+    """Raise on backend responses that don't match the expected status.
+
+    4xx errors are forwarded as-is (client errors from the backend).
+    Everything else (5xx, unexpected 2xx/3xx) is masked with a generic 502
+    to avoid leaking internals or parsing unexpected response bodies.
+    """
+    if b_res.status == expected_status:
+        return
+
+    body = await b_res.read()
+
+    app.logger.error('Backend "%s" unexpected status: %d %s', b_name,
+        b_res.status, body[:1024].decode("utf-8", errors="replace"))
+
+    if 400 <= b_res.status < 500:
+        exc = aiohttp.web.HTTPBadRequest(content_type=b_res.content_type)
+        exc.set_status(b_res.status)
+        exc.body = body
+        raise exc
+
+    raise aiohttp.web.HTTPBadGateway()
