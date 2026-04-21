@@ -39,7 +39,9 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
             "db": {"uri": "sqlite://%s" % self.db_path},
             "backends": {"mymodel":
                 {"url": "http://%s:%d" % (self.backend.host, self.backend.port),
-                    "token": "mybackendtoken", "device": "none"},
+                    "token": "mybackendtoken", "device": "none",
+                    "model": "test-org/mymodel", "type": "chat",
+                    "quantization": "test-quant"},
             },
         })
 
@@ -147,3 +149,153 @@ class TestChat(LLMProxyAppTestCase):
             self.assertEqual(res.status, 502)
 
         self.assertListEqual(await self.get_events(), [])
+
+
+class TestModels(LLMProxyAppTestCase):
+    async def test_list_uses_discovery(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        self.assertEqual(data["object"], "list")
+        self.assertEqual(len(data["data"]), 1)
+        m = data["data"][0]
+        self.assertEqual(m["id"], "mymodel")
+        self.assertEqual(m["object"], "model")
+        self.assertIsNone(m["owned_by"])
+        self.assertEqual(m["type"], "chat")
+        self.assertEqual(m["source_model"], "test-org/mymodel")
+        self.assertEqual(m["card_url"],
+            "https://huggingface.co/test-org/mymodel")
+        self.assertEqual(m["quantization"], "test-quant")
+        self.assertEqual(m["context_length"], 4096)
+        self.assertNotIn("device", m)
+
+    async def test_unauthorized(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer badtoken"})
+        async with req as res:
+            self.assertEqual(res.status, 401)
+
+
+class TestModelsTOMLOverride(LLMProxyAppTestCase):
+    async def get_application(self):
+        app = await super().get_application()
+        app["config"]["backends"]["mymodel"]["context_length"] = 2048
+        return app
+
+    async def test_toml_wins(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            data = await res.json()
+        self.assertEqual(data["data"][0]["context_length"], 2048)
+
+
+class TestModelsNoQuantization(LLMProxyAppTestCase):
+    async def get_application(self):
+        app = await super().get_application()
+        del app["config"]["backends"]["mymodel"]["quantization"]
+        return app
+
+    async def test_field_absent(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            data = await res.json()
+        self.assertNotIn("quantization", data["data"][0])
+
+
+class TestModelsModelUrlOverride(LLMProxyAppTestCase):
+    async def get_application(self):
+        app = await super().get_application()
+        app["config"]["backends"]["mymodel"]["model_url"] = \
+            "https://example.com/custom-card"
+        return app
+
+    async def test_model_url_used(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            data = await res.json()
+        self.assertEqual(data["data"][0]["card_url"],
+            "https://example.com/custom-card")
+
+
+class TestModelsDiscoveryFailure(LLMProxyAppTestCase):
+    async def get_application(self):
+        self.backend.app["v1_models_error"] = 500
+
+        self.db_fd, self.db_path = tempfile.mkstemp()
+
+        app = await create_app({
+            "timeout_connect": 1,
+            "timeout_read": 1,
+            "db": {"uri": "sqlite://%s" % self.db_path},
+            "backends": {"mymodel":
+                {"url": "http://%s:%d" % (self.backend.host, self.backend.port),
+                    "token": "mybackendtoken", "device": "none",
+                    "model": "test-org/mymodel", "type": "chat"},
+            },
+        })
+
+        secret = hashlib.sha256("mytoken".encode()).hexdigest()
+        db = await get_db(app["config"]["db"]["uri"])
+        await db.db.execute("""
+            INSERT INTO api_key (id, secret, type) VALUES ('myuser', ?, 'LLM')
+            """, (secret,))
+        await db.db.commit()
+        await db.close()
+
+        return app
+
+    async def test_probe_failure_graceful(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        self.assertEqual(len(data["data"]), 1)
+        m = data["data"][0]
+        self.assertEqual(m["id"], "mymodel")
+        self.assertNotIn("context_length", m)
+
+
+class TestModelsAudio(LLMProxyAppTestCase):
+    async def get_application(self):
+        self.db_fd, self.db_path = tempfile.mkstemp()
+
+        app = await create_app({
+            "timeout_connect": 1,
+            "timeout_read": 1,
+            "db": {"uri": "sqlite://%s" % self.db_path},
+            "backends": {"mymodel":
+                {"url": "http://%s:%d" % (self.backend.host, self.backend.port),
+                    "token": "mybackendtoken", "device": "none",
+                    "model": "test-org/mymodel", "type": "audio"},
+            },
+        })
+
+        secret = hashlib.sha256("mytoken".encode()).hexdigest()
+        db = await get_db(app["config"]["db"]["uri"])
+        await db.db.execute("""
+            INSERT INTO api_key (id, secret, type) VALUES ('myuser', ?, 'LLM')
+            """, (secret,))
+        await db.db.commit()
+        await db.close()
+
+        return app
+
+    async def test_probe_skipped(self):
+        self.assertEqual(self.backend.app["hits"]["v1_models"], 0)
+
+    async def test_no_context_length_in_response(self):
+        req = self.client.request("GET", "/v1/models",
+            headers={"Authorization": "Bearer mytoken"})
+        async with req as res:
+            data = await res.json()
+        self.assertNotIn("context_length", data["data"][0])
+        self.assertEqual(data["data"][0]["type"], "audio")

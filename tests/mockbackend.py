@@ -6,9 +6,23 @@ async def health(req):
     return aiohttp.web.Response()
 
 
+async def models(req):
+    req.app["hits"]["v1_models"] += 1
+    if (err := req.app.get("v1_models_error")) is not None:
+        return aiohttp.web.Response(status=err)
+    return aiohttp.web.json_response({
+        "object": "list",
+        "data": [{
+            "id": "mymodel",
+            "object": "model",
+            "max_model_len": 4096,
+        }],
+    })
+
+
 async def chat(req):
     b = await req.json()
-    if b["model"] != "mymodel":
+    if b["model"] != "test-org/mymodel":
         raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
 
     if (err := b.get("_trigger_error")) is not None:
@@ -41,8 +55,10 @@ async def chat(req):
 
 def create_app():
     app = aiohttp.web.Application()
+    app["hits"] = {"v1_models": 0}
     app.add_routes([
         aiohttp.web.get("/health", health),
+        aiohttp.web.get("/v1/models", models),
         aiohttp.web.post("/v1/chat/completions", chat),
     ])
     return app

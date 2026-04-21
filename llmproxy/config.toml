@@ -23,12 +23,34 @@ uri = "sqlite://db.sqlite"
 
 # Backend definitions
 # One backend corresponds to one model (retrievable through /v1/models).
+# See README for the full field reference.
 
-#[backends.mybackend1]
-#url = "https://mybackend1.mynamespace.cgc-waw-01.comtegra.cloud"
+#[backends.mychat]
+## Required fields
+#url = "https://mychat.mynamespace.cgc-waw-01.comtegra.cloud"
 #token = "mytoken1"
-#device = "a5000"  # name of the GPU this model runs on
-#model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
-#verify_ssl = true  # optional, set to false to skip certificate verification
+#device = "a5000"                                    # GPU name, used for billing
+#model = "meta-llama/Meta-Llama-3-8B-Instruct"       # full HuggingFace path
+#type = "chat"                                       # "chat" | "embedding" | "audio"
+#
+## Optional fields
+#quantization = "FP8"                                # free-form string
+#context_length = 8192                               # auto-discovered from vLLM/SGLang if absent
+#model_url = "https://example.com/custom-card"       # overrides auto-generated HuggingFace URL
+#verify_ssl = true                                   # set to false to skip certificate verification
+
+#[backends.myembedding]
+#url = "https://myembedding.mynamespace.cgc-waw-01.comtegra.cloud"
+#token = "mytoken2"
+#device = "a5000"
+#model = "BAAI/bge-large-en-v1.5"
+#type = "embedding"                                  # context_length works the same as for chat
+
+#[backends.myaudio]
+#url = "https://myaudio.mynamespace.cgc-waw-01.comtegra.cloud"
+#token = "mytoken3"
+#device = "a5000"
+#model = "openai/whisper-large-v3"
+#type = "audio"                                      # no context_length (not applicable); no /v1/models probe
 
 # Add more backends here

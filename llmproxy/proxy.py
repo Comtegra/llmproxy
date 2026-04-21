@@ -31,8 +31,7 @@ async def request(f_req, body_transform=None):
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     b_body = f_body.copy()
-    if (m := b_cfg.get("model")) is not None:
-        b_body["model"] = m
+    b_body["model"] = b_cfg["model"]
 
     if body_transform is not None:
         body_transform(b_body)

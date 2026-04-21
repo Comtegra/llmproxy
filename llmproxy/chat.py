@@ -113,15 +113,47 @@ async def chat(f_req):
         return f_res
 
 
+def _card_url(cfg):
+    if (u := cfg.get("model_url")) is not None:
+        return u
+    return "https://huggingface.co/%s" % cfg["model"]
+
+
+def _context_length(cfg, meta):
+    if (cl := cfg.get("context_length")) is not None:
+        return cl
+    return meta.get("context_length")
+
+
+def _model_entry(alias, cfg, meta):
+    entry = {
+        "id": alias,
+        "object": "model",
+        "created": None,
+        "owned_by": None,
+        "type": cfg["type"],
+        "source_model": cfg["model"],
+        "card_url": _card_url(cfg),
+    }
+    if (q := cfg.get("quantization")) is not None:
+        entry["quantization"] = q
+    if cfg["type"] in ("chat", "embedding"):
+        if (cl := _context_length(cfg, meta)) is not None:
+            entry["context_length"] = cl
+    return entry
+
+
 async def models(req):
     await auth.require_auth(req)
+
+    backends = req.app["config"].get("backends", {})
+    backend_meta = req.app.get("backend_meta", {})
 
     data = {
         "object": "list",
         "data": [
-            {"id": model, "object": "model", "created": None, "owned_by": None,
-                "device": meta.get("device")}
-            for model, meta in req.app["config"].get("backends", {}).items()
+            _model_entry(alias, cfg, backend_meta.get(alias, {}))
+            for alias, cfg in backends.items()
         ],
     }
 

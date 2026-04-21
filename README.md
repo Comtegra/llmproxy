@@ -31,6 +31,62 @@ pkill -f -HUP 'python3? .*llmproxy'
 docker kill -s=SIGHUP CONTAINER
 ```
 
+### Backend configuration
+
+All backends share a single `[backends.<alias>]` schema regardless of type —
+the `type` field discriminates. The flat layout keeps aliases globally unique
+since they are what clients send as `model` in their requests (e.g.
+`/v1/chat/completions`). Field reference:
+
+| Field | Required | Description |
+|---|---|---|
+| `url` | yes | Backend service URL |
+| `token` | yes | Bearer token for backend auth |
+| `device` | yes | GPU name; used in billing product strings |
+| `model` | yes | Full HuggingFace path (e.g. `Qwen/Qwen3-8B`); exposed in response as `source_model` |
+| `type` | yes | One of `chat`, `embedding`, `audio` |
+| `quantization` | no | Free-form string (e.g. `FP8`, `Q4_K_M`) |
+| `context_length` | no | Integer; auto-discovered from vLLM/SGLang `/v1/models` if absent. Not applicable to `type=audio` |
+| `model_url` | no | Overrides the auto-generated HuggingFace model card URL; exposed in response as `card_url` |
+| `verify_ssl` | no | Default `true` |
+
+At startup the proxy probes each non-audio backend's `/v1/models` endpoint in
+parallel and caches `max_model_len`. An explicit `context_length` in TOML wins
+over discovery; if the two disagree, the proxy logs a warning so stale TOML
+overrides don't go unnoticed. Discovery does not re-run on SIGHUP — restart
+the proxy to pick up a new `max_model_len`.
+
+### Listing models
+
+```sh
+curl -H'Authorization: Bearer token' http://localhost:8080/v1/models
+```
+
+Sample response:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "qwen3-8b",
+      "object": "model",
+      "created": null,
+      "owned_by": null,
+      "type": "chat",
+      "source_model": "Qwen/Qwen3-8B",
+      "card_url": "https://huggingface.co/Qwen/Qwen3-8B",
+      "quantization": "FP8",
+      "context_length": 131072
+    }
+  ]
+}
+```
+
+`id` is the alias clients pass back as `model`. `context_length` is omitted
+for `audio` backends and when neither TOML nor discovery provides a value.
+`quantization` and (optional) other fields are included only when set.
+
 ## Testing
 
 ```sh
