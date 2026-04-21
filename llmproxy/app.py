@@ -33,6 +33,64 @@ async def check_backends(app):
             logging.error("Backend %s not ready: %s", name, e)
 
 
+async def _probe_backend_meta(app, name, cfg):
+    if cfg.get("type") == "audio":
+        return None
+
+    headers = {"Authorization": "Bearer %s" % cfg["token"]}
+    ssl = None if cfg.get("verify_ssl", True) else False
+
+    try:
+        async with app["client"].get(
+            yarl.URL(cfg["url"]) / "v1/models",
+            headers=headers, ssl=ssl, raise_for_status=True,
+        ) as res:
+            data = await res.json()
+
+        if not isinstance(data, dict):
+            logging.warning(
+                "Backend %s: /v1/models response is not a JSON object", name)
+            return None
+
+        for entry in data.get("data", []):
+            m = entry.get("max_model_len")
+            if isinstance(m, int):
+                return m
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError,
+            AttributeError, TypeError) as e:
+        logging.warning(
+            "Backend %s: failed probing /v1/models: %s", name, e)
+        return None
+
+    logging.info(
+        "Backend %s: no max_model_len in /v1/models response", name)
+    return None
+
+
+async def discover_backend_meta(app):
+    backends = app["config"].get("backends", {})
+    results = await asyncio.gather(
+        *(_probe_backend_meta(app, n, c) for n, c in backends.items())
+    )
+
+    meta = {}
+    for (name, cfg), discovered in zip(backends.items(), results):
+        if discovered is None:
+            continue
+        meta[name] = {"context_length": discovered}
+        logging.info(
+            "Backend %s: discovered max_model_len=%d", name, discovered)
+
+        if (toml_cl := cfg.get("context_length")) is not None \
+                and toml_cl != discovered:
+            logging.warning(
+                "Backend %s: TOML context_length=%d differs from "
+                "backend-reported max_model_len=%d",
+                name, toml_cl, discovered)
+
+    app["backend_meta"] = meta
+
+
 @aiohttp.web.middleware
 async def assign_request_id(req, handler):
     req["request_id"] = uuid.uuid4()
@@ -71,6 +129,9 @@ def reload_config(app):
     except OSError as e:
         app.logger.error("Failed reloading config: %s", e)
         return
+    except ValueError as e:
+        app.logger.error("Invalid reloaded config, keeping old: %s", e)
+        return
 
     # Only backends are reloaded
     app["config"]["backends"] = cfg.get("backends", {})
@@ -104,6 +165,7 @@ async def create_app(cfg):
     app.on_cleanup.append(client_close)
 
     await check_backends(app)
+    await discover_backend_meta(app)
 
     return app
 
@@ -118,7 +180,7 @@ def main():
 
     try:
         cfg = config.load(args.config, args.create_config)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
 
