@@ -29,6 +29,7 @@ uri = "sqlite://db.sqlite"
 #token = "mytoken1"
 #device = "a5000"  # name of the GPU this model runs on
 #model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
+#max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
 
 # Add more backends here
