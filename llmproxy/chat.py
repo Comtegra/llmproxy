@@ -25,6 +25,7 @@ async def handle_resp_stream(f_req, b_res):
     app = f_req.app
     headers = {"Content-Type":
         b_res.headers.get("Content-Type", "application/octet-stream")}
+    headers["X-Request-ID"] = str(f_req["request_id"])
     f_res = aiohttp.web.StreamResponse(headers=headers)
 
     f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
@@ -72,11 +73,12 @@ async def chat(f_req):
 
     user = await auth.require_auth(f_req)
 
-    b_req, b_name, b_cfg = await proxy.request(f_req, force_include_usage)
-    async with b_req as b_res:
+    async with proxy.request(f_req, force_include_usage) as (
+            b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
-        await proxy.check_response(app, b_name, b_res)
+        await proxy.check_response(app, b_name, b_res,
+            request_id=f_req["request_id"])
 
         if b_res.headers.get("Transfer-Encoding", "") == "chunked":
             f_res, usage = await handle_resp_stream(f_req, b_res)
@@ -116,13 +118,22 @@ async def chat(f_req):
 async def models(req):
     await auth.require_auth(req)
 
+    models = []
+    for model, meta in req.app["config"].get("backends", {}).items():
+        item = {
+            "id": model,
+            "object": "model",
+            "created": None,
+            "owned_by": None,
+            "device": meta.get("device"),
+        }
+        if "max_model_len" in meta:
+            item["max_model_len"] = meta["max_model_len"]
+        models.append(item)
+
     data = {
         "object": "list",
-        "data": [
-            {"id": model, "object": "model", "created": None, "owned_by": None,
-                "device": meta.get("device")}
-            for model, meta in req.app["config"].get("backends", {}).items()
-        ],
+        "data": models,
     }
 
     return aiohttp.web.Response(text=json.dumps(data),

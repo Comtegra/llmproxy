@@ -4,6 +4,22 @@ import sys
 import tomllib
 
 
+class ConfigError(Exception):
+    pass
+
+
+def validate(cfg):
+    for name, meta in cfg.get("backends", {}).items():
+        if "max_model_len" not in meta:
+            continue
+
+        value = meta["max_model_len"]
+        if type(value) is not int or value <= 0:
+            raise ConfigError(
+                'Backend "%s" max_model_len must be a positive integer' %
+                name)
+
+
 def load(path=None, create=False):
     choices = [path, os.environ.get("LLMPROXY_CONFIG"), "config.toml"]
 
@@ -27,7 +43,10 @@ def load(path=None, create=False):
                     file=sys.stderr)
 
         with open(p, "rb") as f:
-            cfg = tomllib.load(f)
+            try:
+                cfg = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                raise ConfigError("Failed parsing config: %s" % e) from e
             print("Loaded config from \"%s\"" % p, file=sys.stderr)
             cfg["_path"] = p
 
@@ -37,5 +56,7 @@ def load(path=None, create=False):
             cfg["db"]["uri"] = db_uri
             print("Loaded database URI from the LLMPROXY_DB_URI env var",
                 file=sys.stderr)
+
+        validate(cfg)
 
         return cfg

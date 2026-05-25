@@ -22,11 +22,11 @@ async def transcriptions(f_req):
 
     user = await auth.require_auth(f_req)
 
-    b_req, b_name, b_cfg = await proxy.request(f_req, force_verbose)
-    async with b_req as b_res:
+    async with proxy.request(f_req, force_verbose) as (b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
-        await proxy.check_response(app, b_name, b_res)
+        await proxy.check_response(app, b_name, b_res,
+            request_id=f_req["request_id"])
 
         body = await b_res.content.read()
         data = json.loads(body, parse_float=decimal.Decimal)
