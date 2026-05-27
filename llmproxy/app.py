@@ -40,6 +40,19 @@ async def assign_request_id(req, handler):
 
 
 @aiohttp.web.middleware
+async def add_request_id_header(req, handler):
+    try:
+        res = await handler(req)
+    except aiohttp.web.HTTPException as e:
+        e.headers["X-Request-ID"] = str(req["request_id"])
+        raise
+
+    if not res.prepared:
+        res.headers["X-Request-ID"] = str(req["request_id"])
+    return res
+
+
+@aiohttp.web.middleware
 async def add_cors_headers(req, handler):
     try:
         res = await handler(req)
@@ -68,7 +81,7 @@ async def close_db(req, handler):
 def reload_config(app):
     try:
         cfg = config.load(app["config"]["_path"])
-    except OSError as e:
+    except (OSError, config.ConfigError) as e:
         app.logger.error("Failed reloading config: %s", e)
         return
 
@@ -79,8 +92,15 @@ def reload_config(app):
 
 
 async def create_app(cfg):
+    config.validate(cfg)
+
     app = aiohttp.web.Application(
-        middlewares=[assign_request_id, add_cors_headers, close_db])
+        middlewares=[
+            assign_request_id,
+            add_request_id_header,
+            add_cors_headers,
+            close_db,
+        ])
 
     app.add_routes([
         aiohttp.web.post("/v1/chat/completions", chat.chat),
@@ -118,7 +138,7 @@ def main():
 
     try:
         cfg = config.load(args.config, args.create_config)
-    except OSError as e:
+    except (OSError, config.ConfigError) as e:
         print("Failed loading config:", e, file=sys.stderr)
         sys.exit(1)
 
@@ -131,6 +151,9 @@ def main():
         app = loop.run_until_complete(create_app(cfg))
     except ImportError as e:
         logging.critical("Failed to import module \"%s\"", e.name)
+        sys.exit(1)
+    except config.ConfigError as e:
+        logging.critical("Invalid config: %s", e)
         sys.exit(1)
 
     if hasattr(signal, "SIGHUP"):

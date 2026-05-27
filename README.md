@@ -24,6 +24,12 @@ See [llmproxy/config.toml](llmproxy/config.toml) for an example configuration fi
 The program will update the list of configured backends from the config file
 on SIGHUP.
 
+Each backend may define `max_model_len`, the real context limit of the
+deployment in tokens (prompt plus completion). This value is exposed through
+`/v1/models` so clients can avoid sending requests that exceed the backend
+limit. It should match the backend deployment setting (for example vLLM
+`--max-model-len`), not just the public model card.
+
 ```sh
 pkill -f -HUP 'python3? .*llmproxy'
 
