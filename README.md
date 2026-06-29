@@ -37,6 +37,69 @@ pkill -f -HUP 'python3? .*llmproxy'
 docker kill -s=SIGHUP CONTAINER
 ```
 
+## Monitoring (Prometheus metrics)
+
+The proxy exposes Prometheus-compatible metrics at `/metrics` by default.
+This endpoint can be scraped by Prometheus to monitor request volume,
+error rates, backend latency, and token usage — enabling alerts when
+traffic spikes or error rates increase.
+
+### Configuration
+
+Metrics are controlled by the `[metrics]` section in
+[config.toml](llmproxy/config.toml):
+
+```toml
+[metrics]
+enabled = true        # set to false to disable the /metrics endpoint
+path = "/metrics"     # path under which metrics are served
+```
+
+### Available metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llmproxy_requests_total` | Counter | `method`, `path`, `status` | Total HTTP requests received |
+| `llmproxy_request_duration_seconds` | Histogram | `method`, `path`, `status` | End-to-end request latency |
+| `llmproxy_active_requests` | Gauge | — | In-flight requests |
+| `llmproxy_backend_requests_total` | Counter | `model`, `status` | Requests forwarded to backends |
+| `llmproxy_backend_duration_seconds` | Histogram | `model` | Backend response latency |
+| `llmproxy_backend_errors_total` | Counter | `model`, `error_type` | Backend errors (timeout, connection, client_error) |
+| `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
+| `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
+
+### Prometheus scrape config
+
+See [examples/prometheus-scrape.yml](examples/prometheus-scrape.yml) for
+an example scrape configuration:
+
+```yaml
+scrape_configs:
+  - job_name: "llmproxy"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["llm-billing-proxy:8080"]
+```
+
+### Alert rules
+
+Example alert rules for high request volume and high error rates are
+provided in [examples/prometheus-alerts.yml](examples/prometheus-alerts.yml).
+Key alerts:
+
+* **LLMProxyHighRequestRate** — warning when request rate exceeds 100 req/s
+* **LLMProxyVeryHighRequestRate** — critical when request rate exceeds 500 req/s
+* **LLMProxyHighErrorRate** — warning when 5xx error rate exceeds 5%
+* **LLMProxyCriticalErrorRate** — critical when 5xx error rate exceeds 20%
+* **LLMProxyBackendErrors** — per-model backend errors
+* **LLMProxyHighBackendLatency** — p95 backend latency above 30s
+
+### Grafana dashboard
+
+A pre-built Grafana dashboard is available at
+[grafana/dashboard.json](grafana/dashboard.json).
+Import it via Dashboards → New → Import → Upload JSON file.
+
 ## Testing
 
 ```sh

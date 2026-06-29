@@ -7,6 +7,7 @@ RUN apk add \
 	py3-installer \
 	py3-mongo \
 	py3-pip \
+	py3-prometheus-client \
 	py3-setuptools \
 	py3-yarl \
 	python3 \
