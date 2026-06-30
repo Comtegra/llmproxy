@@ -68,10 +68,51 @@ path = "/metrics"     # path under which metrics are served
 | `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
 | `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
 
-### Prometheus scrape config
+### Quick start (Kubernetes + Prometheus Operator)
 
-See [examples/prometheus-scrape.yml](examples/prometheus-scrape.yml) for
-an example scrape configuration:
+If you run Prometheus Operator (kube-prometheus-stack), the full path
+from deploy to Grafana is:
+
+1. **Deploy** the new llmproxy version — the `/metrics` endpoint is
+   active on port 8080 by default.
+
+2. **Create a ServiceMonitor** so Prometheus Operator automatically
+   starts scraping:
+
+   ```sh
+   # Check your Prometheus selector first:
+   kubectl get prometheus -A -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+
+   # Apply the ServiceMonitor (adjust the release label to match):
+   kubectl apply -f k8s/servicemonitor.yaml
+   ```
+
+   If llmproxy has no Kubernetes Service, use the PodMonitor instead:
+
+   ```sh
+   kubectl apply -f k8s/podmonitor.yaml
+   ```
+
+3. **Verify** Prometheus sees the target:
+
+   ```sh
+   # Target should appear as "up":
+   kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+   # Open http://localhost:9090/targets → look for "llmproxy"
+   ```
+
+4. **Import the Grafana dashboard**:
+
+   - Grafana → Dashboards → New → Import → Upload JSON file
+   - Select [grafana/dashboard.json](grafana/dashboard.json)
+   - Choose your Prometheus datasource
+   - The dashboard has 10 panels: request rate, error rate, status codes,
+     active requests, latency percentiles, backend latency/errors, token usage
+
+### Prometheus scrape config (standalone, non-Operator)
+
+If you run Prometheus without the Operator, add a scrape job to your
+`prometheus.yml` instead:
 
 ```yaml
 scrape_configs:
@@ -80,6 +121,9 @@ scrape_configs:
     static_configs:
       - targets: ["llm-billing-proxy:8080"]
 ```
+
+See [examples/prometheus-scrape.yml](examples/prometheus-scrape.yml) for
+a complete example.
 
 ### Alert rules
 
