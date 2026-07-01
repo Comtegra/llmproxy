@@ -1,4 +1,6 @@
 import contextlib
+import decimal
+import json
 
 import aiohttp.web
 
@@ -12,6 +14,35 @@ async def readuntil(stream, separator: bytes = b"\n") -> bytes:
         result += b
 
     return result
+
+
+def parse_sse_event(raw_event):
+    """Decode the JSON from the ``data:`` field(s) of one SSE block (bytes up to
+    the blank line). Returns the decoded object, or None for blocks with no JSON
+    payload (SSE comments, ``[DONE]``, keep-alives, a bare ``event:`` line).
+    Joins multi-line ``data:`` per the SSE spec. Used by the Anthropic and
+    OpenAI-Responses usage accumulators (both send named ``event:``/``data:``
+    blocks, unlike chat's plain ``data: {json}``)."""
+    data_lines = []
+    for line in raw_event.split(b"\n"):
+        line = line.rstrip(b"\r")
+        if line.startswith(b"data:"):
+            payload = line[len(b"data:"):]
+            if payload.startswith(b" "):
+                payload = payload[1:]
+            data_lines.append(payload)
+
+    if not data_lines:
+        return None
+
+    raw = b"\n".join(data_lines)
+    if raw == b"[DONE]":
+        return None
+
+    try:
+        return json.loads(raw, parse_float=decimal.Decimal)
+    except json.decoder.JSONDecodeError:
+        return None
 
 
 async def drain(read_block, write_block, on_chunk, on_disconnect=None,
