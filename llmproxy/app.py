@@ -11,7 +11,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import audio, chat, config, embeddings
+from . import audio, chat, config, embeddings, messages, responses
 from .db import get_db
 
 
@@ -134,6 +134,8 @@ async def create_app(cfg):
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+        aiohttp.web.post("/v1/messages", messages.messages),
+        aiohttp.web.post("/v1/responses", responses.responses),
     ])
 
     app["config"] = cfg

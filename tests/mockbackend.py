@@ -117,6 +117,76 @@ async def transcriptions(req):
     })
 
 
+async def _sse(req, events):
+    res = aiohttp.web.StreamResponse(
+        headers={"Content-Type": "text/event-stream"})
+    res.enable_chunked_encoding()
+    await res.prepare(req)
+    for event, obj in events:
+        await res.write(b"event: " + event.encode() + b"\ndata: "
+            + json.dumps(obj).encode() + b"\n\n")
+    await res.write_eof()
+    return res
+
+
+async def messages(req):
+    b = await req.json()
+    if b["model"] != "mymodel":
+        raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
+
+    if b.get("stream"):
+        # Anthropic splits usage: input (+cache) in message_start, cumulative
+        # output in the final message_delta.
+        return await _sse(req, [
+            ("message_start", {"type": "message_start",
+                "message": {"usage": {"input_tokens": 3, "output_tokens": 1}}}),
+            ("content_block_delta", {"type": "content_block_delta",
+                "delta": {"text": "hi"}}),
+            ("message_delta", {"type": "message_delta",
+                "usage": {"output_tokens": 5}}),
+            ("message_stop", {"type": "message_stop"}),
+        ])
+
+    if b.get("_no_usage"):
+        # 200 without a usage object -> the proxy must fail loud, not bill 0.
+        return aiohttp.web.json_response({
+            "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}]})
+
+    return aiohttp.web.json_response({
+        "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+    })
+
+
+async def responses(req):
+    b = await req.json()
+    if b["model"] != "mymodel":
+        raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
+
+    if b.get("stream"):
+        # Usage only in the terminal event; no [DONE]. `_terminal` lets tests
+        # end the stream with response.completed / .incomplete / .failed.
+        terminal = b.get("_terminal", "response.completed")
+        return await _sse(req, [
+            ("response.created", {"type": "response.created",
+                "response": {"id": "resp_1"}}),
+            ("response.output_text.delta",
+                {"type": "response.output_text.delta", "delta": "hi"}),
+            (terminal, {"type": terminal,
+                "response": {"usage":
+                    {"input_tokens": 7, "output_tokens": 9}}}),
+        ])
+
+    return aiohttp.web.json_response({
+        "object": "response",
+        "output": [{"type": "message",
+            "content": [{"type": "output_text", "text": "hi"}]}],
+        "usage": {"input_tokens": 7, "output_tokens": 9},
+    })
+
+
 def create_app():
     # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
     app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3)
@@ -125,5 +195,7 @@ def create_app():
         aiohttp.web.post("/v1/chat/completions", chat),
         aiohttp.web.post("/v1/embeddings", embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", transcriptions),
+        aiohttp.web.post("/v1/messages", messages),
+        aiohttp.web.post("/v1/responses", responses),
     ])
     return app
