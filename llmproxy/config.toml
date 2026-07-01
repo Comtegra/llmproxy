@@ -48,6 +48,7 @@ uri = "sqlite://db.sqlite"
 #model = "meta-llama/Meta-Llama-3-8B-Instruct"  # optional, the real model id vLLM expects (overrides the client's "model")
 #max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
+#timeout = 300  # optional; RAISE for reasoning / extended-thinking models that can pause >timeout_read (60s) between tokens mid-stream, else the stream 504s and that turn is unbilled
 
 # Example transcription backend (whisper microservice, /v1/audio/transcriptions).
 # Transcription can take minutes, so give it a long per-backend timeout to
