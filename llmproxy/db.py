@@ -12,6 +12,46 @@ sqlite3.register_adapter(datetime.datetime, lambda d: d.isoformat())
 sqlite3.register_adapter(decimal.Decimal, float)
 
 
+def _decimal_to_bson(value):
+    """Map a Decimal to the type stored in Mongo: an int when the value is an
+    exact integer, otherwise a bson Decimal128. Token counts stay ints; audio
+    seconds may be fractional and become Decimal128."""
+    import bson
+
+    with decimal.localcontext() as ctx:
+        ctx.clear_flags()
+        i = value.to_integral_exact(context=ctx)
+        if not ctx.flags[decimal.Inexact]:
+            return int(i)
+
+    return bson.decimal128.Decimal128(value)
+
+
+def _billing_document(user, time, resources, request_id):
+    """Build the cgc.billing_record document for one successful request.
+
+    Pure (no I/O) so the exact stored shape is unit-testable. ``request_id`` is
+    persisted for traceability/reconciliation (it was previously dropped on the
+    Mongo path)."""
+    return {
+        "cluster_id": None,
+        "namespace": user["_namespace"],
+        "name": "",
+        "revision": 1,
+        "created_at": time,
+        "deleted_at": None,
+        "resources": resources,
+        "type": "oneoff",
+        "k8s_uid": None,
+        "user_id": user["_user_id"],
+        "api_key_id": user["id"],
+        "org_id": user["_org_id"],
+        "tier": user["_tier"],
+        "request_id": str(request_id),
+        "revision_synced": None,
+    }
+
+
 async def get_db(uri, req=None):
     if req is not None and "db" in req:
         return req["db"]
@@ -46,14 +86,7 @@ class MongoDatabase:
             bson_type = bson.decimal128.Decimal128
 
             def transform_python(self, value):
-                # If the decimal can be represented by an exact integer, use it
-                with decimal.localcontext() as ctx:
-                    ctx.clear_flags()
-                    i = value.to_integral_exact(context=ctx)
-                    if not ctx.flags[decimal.Inexact]:
-                        return int(i)
-
-                return bson.decimal128.Decimal128(value)
+                return _decimal_to_bson(value)
 
             def transform_bson(self, value):
                 return value.to_decimal()
@@ -127,22 +160,8 @@ class MongoDatabase:
             codec_options=self.copt)
 
         try:
-            await col.insert_one({
-                "cluster_id": None,
-                "namespace": user["_namespace"],
-                "name": "",
-                "revision": 1,
-                "created_at": time,
-                "deleted_at": None,
-                "resources": resources,
-                "type": "oneoff",
-                "k8s_uid": None,
-                "user_id": user["_user_id"],
-                "api_key_id": user["id"],
-                "org_id": user["_org_id"],
-                "tier": user["_tier"],
-                "revision_synced": None,
-            })
+            await col.insert_one(
+                _billing_document(user, time, resources, request_id))
         except pymongo.errors.PyMongoError as e:
             raise DatabaseError(e) from e
 

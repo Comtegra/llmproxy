@@ -172,4 +172,9 @@ def main():
         ssl_context=ssl_ctx,
         access_log_format="%a \"%r\" %s %Tfs",
         loop=loop,
+        # Billing-critical: on client disconnect the handler MUST run to
+        # completion so the backend stream is drained and usage is billed.
+        # This is aiohttp's default, pinned explicitly because it is a silent
+        # revenue dependency (and aiohttp's own test harness forces it True).
+        handler_cancellation=False,
     )

@@ -227,6 +227,57 @@ class TestChat(LLMProxyAppTestCase):
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
 
+    async def test_embeddings_billing(self):
+        body = {"model": "mymodel", "input": "hello"}
+        req = self.client.request("POST", "/v1/embeddings",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        self.assertEqual(data["usage"]["prompt_tokens"], 7)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/embedding", "quantity": 7},
+        ])
+
+    async def test_audio_transcription_billing(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("file", b"RIFFfake-audio", filename="a.wav",
+            content_type="audio/wav")
+        req = self.client.request("POST", "/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        # Billed per second of audio; fractional durations must survive.
+        self.assertEqual(data["duration"], 12.5)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/transcription", "quantity": 12.5},
+        ])
+
+    async def test_streaming_usage_in_trailing_chunk(self):
+        # Realistic vLLM: usage arrives in a separate trailing chunk, not the
+        # content chunk. The proxy must keep the last non-[DONE] chunk.
+        body = {"model": "mymodel", "stream": True,
+            "_stream_mode": "split_usage",
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            text = await res.text()
+            self.assertIn("data: [DONE]", text)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/prompt", "quantity": 1},
+            {"product": "mymodel/none/completion", "quantity": 2},
+        ])
+
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_positive_integer_max_model_len(self):
