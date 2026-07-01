@@ -94,19 +94,32 @@ async def embeddings(req):
 async def transcriptions(req):
     # Multipart in. The proxy forces response_format=verbose_json and bills the
     # top-level `duration`. Fractional on purpose to exercise Decimal handling.
-    await req.post()
+    post = await req.post()
+
+    if post.get("_omit_duration"):
+        # Simulate a backend that fails to report a billable duration.
+        return aiohttp.web.json_response({
+            "task": "transcribe", "language": "pl", "text": "no duration"})
+
+    # Inject unbillable durations to exercise the proxy guard. json_response
+    # emits bare NaN/Infinity (json.dumps allow_nan default), just like a real
+    # Python backend serialized with the default settings.
+    unbillable = {"zero": 0, "neg": -5, "nan": float("nan"),
+        "inf": float("inf"), "true": True}
+    duration = unbillable.get(post.get("_duration"), 12.5)
 
     return aiohttp.web.json_response({
         "task": "transcribe",
         "language": "pl",
-        "duration": 12.5,
+        "duration": duration,
         "text": "you said something",
         "segments": [],
     })
 
 
 def create_app():
-    app = aiohttp.web.Application()
+    # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
+    app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3)
     app.add_routes([
         aiohttp.web.get("/health", health),
         aiohttp.web.post("/v1/chat/completions", chat),

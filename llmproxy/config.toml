@@ -7,7 +7,16 @@ port = 8080
 
 # Backend timeouts
 timeout_connect = 5  # connection timeout
-timeout_read = 60  # response timeout
+timeout_read = 60  # response timeout (global default sock_read; override per-backend)
+
+# Maximum accepted request body size in bytes. Default is 2 GiB so audio
+# uploads work; lower it if this proxy only serves text endpoints.
+#client_max_size = 2147483648
+
+# Maximum request body (bytes) for non-audio endpoints (chat/embeddings). Caps
+# JSON buffering so a huge body can't OOM the worker; audio uploads are exempt
+# (bounded by client_max_size). Default 32 MiB.
+#max_json_body = 33554432
 
 # Allowed HTTP origins
 # This value will be sent in the Access-Control-Allow-Origin response header.
@@ -31,5 +40,13 @@ uri = "sqlite://db.sqlite"
 #model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
 #max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
+
+# Example transcription backend (whisper microservice). Transcription can take
+# minutes, so give it a long per-backend timeout to override timeout_read.
+#[backends.whisper-1]
+#url = "https://whisper.mynamespace.cgc-waw-01.comtegra.cloud"
+#token = "APP_TOKEN"
+#device = "a5000"
+#timeout = 1800  # optional, per-backend response (sock_read) timeout in seconds
 
 # Add more backends here

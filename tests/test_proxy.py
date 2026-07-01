@@ -38,6 +38,7 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         app = await create_app({
             "timeout_connect": 1,
             "timeout_read": 1,
+            "max_json_body": 1024 * 1024,
             "db": {"uri": "sqlite://%s" % self.db_path},
             "backends": {
                 "mymodel": {
@@ -54,6 +55,14 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
                     "device": "none",
                     "model": "mymodel",
                     "verify_ssl": False,
+                },
+                "slowok": {
+                    "url": "http://%s:%d" % (
+                        self.backend.host, self.backend.port),
+                    "token": "mybackendtoken",
+                    "device": "none",
+                    "model": "mymodel",
+                    "timeout": 5,
                 },
             },
         })
@@ -278,6 +287,90 @@ class TestChat(LLMProxyAppTestCase):
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
 
+    async def test_per_backend_timeout_allows_slow_backend(self):
+        # Global sock_read=1 would 504 a 2s backend; a backend with a long
+        # per-backend timeout waits and still bills.
+        body = {"model": "slowok", "_trigger_error": "slow",
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "slowok/none/prompt", "quantity": 1},
+            {"product": "slowok/none/completion", "quantity": 2},
+        ])
+
+    async def test_large_audio_upload_accepted(self):
+        # A >1 MiB upload must not be rejected: aiohttp's default client_max_size
+        # is 1 MiB, and the app raises it so audio works.
+        big = b"\x00" * (2 * 1024 * 1024)
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("file", big, filename="a.wav",
+            content_type="audio/wav")
+        req = self.client.request("POST", "/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/transcription", "quantity": 12.5},
+        ])
+
+    async def test_unbillable_duration_fails_loud(self):
+        # Missing, zero, negative, NaN and Infinity durations are all
+        # unbillable -> 502 + no billing (never a corrupt or zero billing row).
+        cases = [("_omit_duration", "1"), ("_duration", "zero"),
+            ("_duration", "neg"), ("_duration", "nan"), ("_duration", "inf"),
+            ("_duration", "true")]
+        for field, value in cases:
+            with self.subTest(case=value):
+                form = aiohttp.FormData()
+                form.add_field("model", "mymodel")
+                form.add_field(field, value)
+                form.add_field("file", b"RIFFfake", filename="a.wav",
+                    content_type="audio/wav")
+                req = self.client.request("POST", "/v1/audio/transcriptions",
+                    headers={"Authorization": "Bearer mytoken"}, data=form)
+
+                async with req as res:
+                    self.assertEqual(res.status, 502)
+
+                self.assertListEqual(await self.get_events(), [])
+
+    async def test_oversized_json_body_rejected(self):
+        # A JSON body over max_json_body is rejected with 413 before it is
+        # buffered, protecting the text endpoints from a memory-exhaustion DoS.
+        big = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "x" * (2 * 1024 * 1024)}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=big)
+
+        async with req as res:
+            self.assertEqual(res.status, 413)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_oversized_chunked_body_rejected(self):
+        # The cap must also hold for a chunked body (no Content-Length), which
+        # would slip past a Content-Length-only check.
+        async def gen():
+            for _ in range(2 * 1024):  # ~2 MiB in 1 KiB chunks
+                yield b"x" * 1024
+
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken",
+                "Content-Type": "application/json"}, data=gen())
+
+        async with req as res:
+            self.assertEqual(res.status, 413)
+
+        self.assertListEqual(await self.get_events(), [])
+
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_positive_integer_max_model_len(self):
@@ -290,6 +383,25 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
                     config.validate({
                         "backends": {"mymodel": {"max_model_len": value}},
                     })
+
+    def test_validate_rejects_invalid_body_limits(self):
+        for key in ("client_max_size", "max_json_body"):
+            for value in (0, -1, "100", True):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(config.ConfigError):
+                        config.validate({key: value})
+
+    def test_validate_rejects_invalid_backend_timeout(self):
+        for value in (0, -1, "5", True):
+            with self.subTest(value=value):
+                with self.assertRaises(config.ConfigError):
+                    config.validate({"backends": {"m": {"timeout": value}}})
+
+    def test_validate_accepts_valid_timeout_and_client_max_size(self):
+        config.validate({
+            "client_max_size": 2147483648,
+            "backends": {"m": {"timeout": 1800}, "n": {"timeout": 0.5}},
+        })
 
     def test_load_invalid_toml_raises_config_error(self):
         fd, path = tempfile.mkstemp(suffix=".toml")
