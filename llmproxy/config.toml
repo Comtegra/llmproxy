@@ -31,22 +31,31 @@ http_origin = "*"
 uri = "sqlite://db.sqlite"
 
 # Backend definitions
-# One backend corresponds to one model (retrievable through /v1/models).
+# One backend = one model, selected by the request's `model` field. The proxy
+# forwards path-preserving, so a SINGLE vLLM backend serves ALL text endpoints
+# for that model: /v1/chat/completions, /v1/completions, /v1/embeddings,
+# /v1/messages (Anthropic) and /v1/responses (OpenAI) -- vLLM speaks them all
+# natively. The whisper microservice (below) serves /v1/audio/transcriptions.
+# The backend NAME (e.g. [backends.llama3-8b]) is what clients send as "model"
+# and what appears in the billing product-string (name/device/kind).
 
-#[backends.mybackend1]
-#url = "https://mybackend1.mynamespace.cgc-waw-01.comtegra.cloud"
+# Example vLLM text backend (chat + completions + embeddings + messages +
+# responses). A client selects it with {"model": "llama3-8b", ...}.
+#[backends.llama3-8b]
+#url = "https://vllm-llama3.mynamespace.cgc-waw-01.comtegra.cloud"
 #token = "mytoken1"
-#device = "a5000"  # name of the GPU this model runs on
-#model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
+#device = "a5000"  # GPU name; goes into the billing product-string (llama3-8b/a5000/prompt|completion)
+#model = "meta-llama/Meta-Llama-3-8B-Instruct"  # optional, the real model id vLLM expects (overrides the client's "model")
 #max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
 
-# Example transcription backend (whisper microservice). Transcription can take
-# minutes, so give it a long per-backend timeout to override timeout_read.
+# Example transcription backend (whisper microservice, /v1/audio/transcriptions).
+# Transcription can take minutes, so give it a long per-backend timeout to
+# override the global timeout_read. Client selects it with {"model": "whisper-1"}.
 #[backends.whisper-1]
 #url = "https://whisper.mynamespace.cgc-waw-01.comtegra.cloud"
-#token = "APP_TOKEN"
-#device = "a5000"
-#timeout = 1800  # optional, per-backend response (sock_read) timeout in seconds
+#token = "APP_TOKEN"  # the microservice's APP_TOKEN (bearer)
+#device = "a5000"  # billed as whisper-1/a5000/transcription (per second of audio)
+#timeout = 1800  # per-backend response (sock_read) timeout in seconds; audio is silent for minutes
 
 # Add more backends here
