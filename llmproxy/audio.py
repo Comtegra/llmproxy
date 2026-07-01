@@ -1,11 +1,9 @@
-import datetime
 import decimal
 import json
 
 import aiohttp
 
-from . import auth, proxy
-from .db import DatabaseError, get_db
+from . import auth, billing, proxy
 
 
 def force_verbose(body):
@@ -34,19 +32,10 @@ async def transcriptions(f_req):
             b_res.headers.get("Content-Type", "application/octet-stream")}
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
-        db = await get_db(app["config"]["db"]["uri"], f_req)
-        res = {"%s/%s/transcription" % (b_name, b_cfg["device"]):
-            data["duration"]}
-        try:
-            await db.billing_record_add(
-                user=user,
-                time=datetime.datetime.now(datetime.UTC),
-                resources=res,
-                request_id=f_req["request_id"],
-            )
-        except DatabaseError as e:
-            app.logger.critical(e)
-            raise aiohttp.web.GracefulExit() from e
+        await billing.record(f_req, user, {
+            "%s/%s/transcription" % (b_name, b_cfg["device"]):
+                data["duration"],
+        })
 
         app.logger.info("Client used: %d s of %s", data["duration"], b_name)
 
