@@ -21,9 +21,13 @@ from . import auth, billing, proxy, streaming
 
 
 def _input_tokens(usage):
-    """Anthropic input billed as prompt = input + cache creation + cache read
-    (cache_* may be absent, e.g. vLLM #45079)."""
-    return (usage.get("input_tokens", 0)
+    """Anthropic input billed as prompt = input + cache creation + cache read.
+
+    input_tokens is REQUIRED (fail loud on absence, like chat/responses; a
+    present 0 is legitimate for a fully cache-read turn); cache_* are optional
+    (may be absent, e.g. vLLM #45079).
+    """
+    return (usage["input_tokens"]
         + (usage.get("cache_creation_input_tokens") or 0)
         + (usage.get("cache_read_input_tokens") or 0))
 
@@ -38,7 +42,7 @@ class _MessagesStreamUsage:
     """
 
     def __init__(self):
-        self._input = None
+        self._start_usage = None
         self._output = None
 
     def __call__(self, chunk):
@@ -47,18 +51,21 @@ class _MessagesStreamUsage:
             return
         event_type = obj.get("type")
         if event_type == "message_start":
-            usage = (obj.get("message") or {}).get("usage") or {}
-            self._input = _input_tokens(usage)
+            self._start_usage = (obj.get("message") or {}).get("usage") or {}
         elif event_type == "message_delta":
             usage = obj.get("usage") or {}
             if usage.get("output_tokens") is not None:
                 self._output = usage["output_tokens"]  # cumulative; keep last
 
     def usage(self):
-        if self._input is None or self._output is None:
+        if self._start_usage is None or self._output is None:
             raise ValueError("missing Anthropic usage in stream "
                 "(no message_start or final message_delta)")
-        return {"prompt_tokens": self._input, "completion_tokens": self._output}
+        # _input_tokens requires input_tokens -> fail loud (not silent 0) if a
+        # present message_start usage omits it. Computed here (after the stream
+        # forwards) rather than in __call__, so the client still gets the body.
+        return {"prompt_tokens": _input_tokens(self._start_usage),
+            "completion_tokens": self._output}
 
 
 # Frontend related variables are prefixed with f_.
@@ -74,7 +81,7 @@ async def messages(f_req):
         await proxy.check_response(app, b_name, b_res,
             request_id=f_req["request_id"])
 
-        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
+        if "text/event-stream" in b_res.headers.get("Content-Type", ""):
             usage_acc = _MessagesStreamUsage()
             f_res = await streaming.stream_through(f_req, b_res, usage_acc)
             usage = usage_acc.usage()

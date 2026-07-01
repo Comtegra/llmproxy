@@ -14,6 +14,21 @@ async def chat(req):
     if b["model"] != "mymodel":
         raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
 
+    if b.get("_chunked_nonstream"):
+        # Non-stream JSON delivered with chunked Transfer-Encoding (as a
+        # buffering reverse proxy / HTTP-2 hop might re-frame it). Content-Type
+        # stays application/json, so the proxy must NOT misdetect it as a
+        # stream (which would silently drop billing).
+        res = aiohttp.web.StreamResponse(
+            headers={"Content-Type": "application/json"})
+        res.enable_chunked_encoding()
+        await res.prepare(req)
+        await res.write(json.dumps({
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}}).encode())
+        await res.write_eof()
+        return res
+
     if (err := b.get("_trigger_error")) is not None:
         if err == "context500":
             return aiohttp.web.json_response(
@@ -152,6 +167,13 @@ async def messages(req):
         return aiohttp.web.json_response({
             "type": "message", "role": "assistant",
             "content": [{"type": "text", "text": "hi"}]})
+
+    if b.get("_no_input"):
+        # usage present but missing input_tokens -> fail loud, not prompt=0.
+        return aiohttp.web.json_response({
+            "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"output_tokens": 5}})
 
     return aiohttp.web.json_response({
         "type": "message", "role": "assistant",

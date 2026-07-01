@@ -371,6 +371,23 @@ class TestChat(LLMProxyAppTestCase):
 
         self.assertListEqual(await self.get_events(), [])
 
+    async def test_chunked_nonstream_billed_via_nonstream_path(self):
+        # Streaming is detected by Content-Type, not Transfer-Encoding: a
+        # non-stream JSON body arriving chunked (buffering proxy / HTTP-2)
+        # must still be billed via the non-stream path, not silently dropped.
+        body = {"model": "mymodel", "_chunked_nonstream": True,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/prompt", "quantity": 1},
+            {"product": "mymodel/none/completion", "quantity": 2},
+        ])
+
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_positive_integer_max_model_len(self):

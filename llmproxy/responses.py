@@ -139,7 +139,7 @@ async def responses(f_req):
             await proxy.check_response(app, b_name, b_res,
                 request_id=f_req["request_id"])
 
-            if b_res.headers.get("Transfer-Encoding", "") == "chunked":
+            if "text/event-stream" in b_res.headers.get("Content-Type", ""):
                 usage_acc = _ResponsesStreamUsage()
                 f_res = await streaming.stream_through(f_req, b_res, usage_acc)
                 usage = usage_acc.usage()
