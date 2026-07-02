@@ -371,6 +371,51 @@ class TestChat(LLMProxyAppTestCase):
 
         self.assertListEqual(await self.get_events(), [])
 
+    @staticmethod
+    def _multipart_form():
+        # A file field (filename set) forces real multipart/form-data encoding;
+        # a form of plain string fields would be sent as urlencoded, which
+        # proxy.request already rejects on a different path.
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("payload", b"x" * 4096, filename="p.bin",
+            content_type="application/octet-stream")
+        return form
+
+    async def test_multipart_rejected_on_text_endpoints(self):
+        # multipart on a JSON endpoint is rejected with 415 in the middleware,
+        # BEFORE proxy.request would call post() and buffer the whole body into
+        # memory (aiohttp's post() reads each non-file field WHOLE before the
+        # size cap is checked -> an authenticated client could OOM the single
+        # worker). Without the guard these reach post()+the backend and 502;
+        # the 415 (not 502) proves the body was never read and bills nothing.
+        for path in ("/v1/chat/completions", "/v1/completions",
+                "/v1/embeddings", "/v1/messages", "/v1/responses"):
+            with self.subTest(path=path):
+                req = self.client.request("POST", path,
+                    headers={"Authorization": "Bearer mytoken"},
+                    data=self._multipart_form())
+
+                async with req as res:
+                    self.assertEqual(res.status, 415)
+                    self.assertIn("X-Request-ID", res.headers)
+
+                self.assertListEqual(await self.get_events(), [])
+
+    async def test_multipart_rejected_before_auth(self):
+        # The guard lives in limit_request_body, ahead of the handler's auth,
+        # so the DoS vector is dropped without even a DB auth lookup: an INVALID
+        # token still yields 415, not 401 (which is what it would be if the
+        # multipart body reached the handler's auth+post()).
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer badtoken"},
+            data=self._multipart_form())
+
+        async with req as res:
+            self.assertEqual(res.status, 415)
+
+        self.assertListEqual(await self.get_events(), [])
+
     async def test_chunked_nonstream_billed_via_nonstream_path(self):
         # Streaming is detected by Content-Type, not Transfer-Encoding: a
         # non-stream JSON body arriving chunked (buffering proxy / HTTP-2)

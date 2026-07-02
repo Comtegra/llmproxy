@@ -90,6 +90,14 @@ async def limit_request_body(req, handler):
     # chunked bodies with no Content-Length; aiohttp has no public per-route
     # limit), and reject early when the client declares an oversized body.
     if req.path != "/v1/audio/transcriptions":
+        # Only the audio route consumes multipart. On the JSON text endpoints a
+        # multipart body would be parsed by aiohttp's post(): each non-file
+        # field is read WHOLE into memory before _client_max_size is checked, so
+        # it bypasses the byte-bounded read below and lets an authenticated
+        # client OOM the single worker. Reject it here, before any body is read.
+        if req.content_type == "multipart/form-data":
+            raise aiohttp.web.HTTPUnsupportedMediaType(
+                text="multipart/form-data is not supported on this endpoint")
         limit = req.app["config"].get("max_json_body", JSON_BODY_LIMIT)
         req._client_max_size = limit
         if req.content_length is not None and req.content_length > limit:
