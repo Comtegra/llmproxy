@@ -39,6 +39,18 @@ uri = "sqlite://db.sqlite"
 # The backend NAME (e.g. [backends.llama3-8b]) is what clients send as "model"
 # and what appears in the billing product-string (name/device/kind).
 
+# IMPORTANT -- vLLM version pin. /v1/messages and /v1/responses meter usage
+# from vLLM's native usage-event shapes, so the vLLM release matters:
+#   * < 0.13.0  -- the Anthropic `message_start` event carries NO usage, so the
+#                  proxy fails loud (500) on EVERY streaming /v1/messages request.
+#                  Do NOT deploy against these.
+#   * >= 0.13.0 -- minimum that bills /v1/messages correctly (input_tokens present).
+#   * >= 0.21.0 -- RECOMMENDED: also fixes Codex multi-turn on /v1/responses.
+#   * 0.24.0    -- version the accumulators were verified against.
+# (/v1/messages exists from 0.11.1 and /v1/responses from 0.10.0, but only
+# >= 0.13.0 reports usage in the shape this proxy bills.) Pin your vLLM image
+# tag accordingly and confirm the streaming usage shapes in a PoC before prod.
+
 # Example vLLM text backend (chat + completions + embeddings + messages +
 # responses). A client selects it with {"model": "llama3-8b", ...}.
 #[backends.llama3-8b]
