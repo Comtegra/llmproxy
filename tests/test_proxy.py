@@ -9,6 +9,7 @@ import warnings
 
 import aiohttp
 import aiohttp.test_utils
+import prometheus_client
 
 from llmproxy import config
 from llmproxy.app import create_app, reload_config
@@ -280,3 +281,154 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
             config.load = old_load
 
         self.assertEqual(app["config"]["backends"], {"old": {}})
+
+
+def _parse_metrics(text):
+    """Parse Prometheus exposition format into {metric_name: [lines]}."""
+    metrics = {}
+    for line in text.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        name = line.split("{", 1)[0].split(" ", 1)[0]
+        metrics.setdefault(name, []).append(line)
+    return metrics
+
+
+class TestMetrics(LLMProxyAppTestCase):
+    async def test_metrics_endpoint_exists(self):
+        """The /metrics endpoint returns 200 and Prometheus content type."""
+        async with self.client.request("GET", "/metrics") as res:
+            self.assertEqual(res.status, 200)
+            self.assertIn("text/plain", res.headers.get("Content-Type", ""))
+
+    async def test_metrics_contain_request_counter(self):
+        """After a request the metrics expose llmproxy_requests_total."""
+        # Make a chat request first.
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        # Scrape metrics.
+        async with self.client.request("GET", "/metrics") as res:
+            self.assertEqual(res.status, 200)
+            text = await res.text()
+
+        parsed = _parse_metrics(text)
+        self.assertIn("llmproxy_requests_total", parsed)
+
+        # There should be a series for the POST /v1/chat/completions 200.
+        found = any(
+            'method="POST"' in line
+            and 'path="/v1/chat/completions"' in line
+            and 'status="200"' in line
+            for line in parsed["llmproxy_requests_total"]
+        )
+        self.assertTrue(found,
+            "llmproxy_requests_total missing POST /v1/chat/completions 200")
+
+    async def test_metrics_contain_error_counter_on_401(self):
+        """A 401 request is counted with status=401."""
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer badtoken"}, json=body) as res:
+            self.assertEqual(res.status, 401)
+
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        parsed = _parse_metrics(text)
+        self.assertIn("llmproxy_requests_total", parsed)
+        found = any(
+            'status="401"' in line
+            for line in parsed["llmproxy_requests_total"]
+        )
+        self.assertTrue(found, "llmproxy_requests_total missing status=401")
+
+    async def test_metrics_contain_backend_counter(self):
+        """Backend metrics are exposed after a successful request."""
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        parsed = _parse_metrics(text)
+        self.assertIn("llmproxy_backend_requests_total", parsed)
+        found = any(
+            'model="mymodel"' in line
+            and 'status="200"' in line
+            for line in parsed["llmproxy_backend_requests_total"]
+        )
+        self.assertTrue(found,
+            "llmproxy_backend_requests_total missing mymodel 200")
+
+    async def test_metrics_contain_token_counter(self):
+        """Token metrics are exposed after a successful chat request."""
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        parsed = _parse_metrics(text)
+        self.assertIn("llmproxy_tokens_total", parsed)
+        found_prompt = any(
+            'model="mymodel"' in line
+            and 'type="prompt"' in line
+            for line in parsed["llmproxy_tokens_total"]
+        )
+        found_completion = any(
+            'model="mymodel"' in line
+            and 'type="completion"' in line
+            for line in parsed["llmproxy_tokens_total"]
+        )
+        self.assertTrue(found_prompt, "missing prompt token metric")
+        self.assertTrue(found_completion, "missing completion token metric")
+
+    async def test_metrics_contain_duration_histogram(self):
+        """Request duration histogram is exposed."""
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        # Histograms produce _bucket, _sum, and _count series.
+        self.assertIn("llmproxy_request_duration_seconds_bucket", text)
+        self.assertIn("llmproxy_request_duration_seconds_count", text)
+        self.assertIn("llmproxy_backend_duration_seconds_count", text)
+
+    async def test_metrics_contain_active_requests_gauge(self):
+        """The active requests gauge is present (value 0 when idle)."""
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        self.assertIn("llmproxy_active_requests", text)
+
+    async def test_metrics_endpoint_itself_is_counted(self):
+        """The /metrics scrape is also counted by the middleware."""
+        async with self.client.request("GET", "/metrics") as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            text = await res.text()
+
+        parsed = _parse_metrics(text)
+        found = any(
+            'method="GET"' in line
+            and 'path="/metrics"' in line
+            for line in parsed.get("llmproxy_requests_total", [])
+        )
+        self.assertTrue(found, "metrics endpoint not counted")

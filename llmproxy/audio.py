@@ -5,6 +5,7 @@ import json
 import aiohttp
 
 from . import auth, proxy
+from . import metrics
 from .db import DatabaseError, get_db
 
 
@@ -49,5 +50,7 @@ async def transcriptions(f_req):
             raise aiohttp.web.GracefulExit() from e
 
         app.logger.info("Client used: %d s of %s", data["duration"], b_name)
+
+        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(data["duration"])
 
         return f_res

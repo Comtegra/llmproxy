@@ -1,0 +1,60 @@
+# ServiceMonitor for Prometheus Operator.
+#
+# Prometheus Operator automatically discovers ServiceMonitor CRDs and
+# configures scrape jobs from them.  Apply this manifest in the namespace
+# where llmproxy runs:
+#
+#   kubectl apply -f k8s/servicemonitor.yaml
+#
+# Prerequisites:
+#   - llmproxy must be exposed via a Kubernetes Service on port 8080
+#   - The Prometheus instance must select this ServiceMonitor via its
+#     serviceMonitorSelector (see below — adjust the label to match
+#     your Prometheus Operator setup).
+#
+# How it works:
+#   1. Prometheus Operator sees the new ServiceMonitor CRD
+#   2. It finds the Service matching the selector below
+#   3. It scrapes /metrics on every pod behind that Service
+#   4. Metrics appear in Prometheus under job_name "llmproxy"
+#
+# ── Common gotcha: label matching ──────────────────────────────────
+# The `metadata.labels` here must match the `serviceMonitorSelector` in
+# your Prometheus CRD.  The most common setups use one of:
+#
+#   # kube-prometheus-stack default (Helm release name):
+#   labels:
+#     release: kube-prometheus-stack
+#
+#   # Or if your Prometheus selects all ServiceMonitors:
+#   # (no label selector needed — Prometheus CRD has empty selector)
+#
+# Check your Prometheus selector:
+#   kubectl get prometheus -A -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+# ───────────────────────────────────────────────────────────────────
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llmproxy
+  namespace: default  # ← change to the namespace where llmproxy runs
+  labels:
+    # Adjust this label to match your Prometheus serviceMonitorSelector.
+    # For kube-prometheus-stack Helm chart, the default is:
+    release: kube-prometheus-stack
+    # App-label for organizational purposes:
+    app: llm-billing-proxy
+spec:
+  selector:
+    matchLabels:
+      # This must match the labels on your llmproxy Service.
+      # Adjust if your Service uses different labels.
+      app: llm-billing-proxy
+  endpoints:
+    - port: http
+      # If your Service uses named port "http", use the name above.
+      # If it uses a numeric port, replace with:
+      #   targetPort: 8080
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
