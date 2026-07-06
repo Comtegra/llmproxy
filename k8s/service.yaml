@@ -1,0 +1,21 @@
+# Example Kubernetes Service for llmproxy.
+#
+# Only needed if llmproxy is not already exposed via a Service.
+# If you already have a Service, skip this file and adjust the labels
+# in servicemonitor.yaml to match your existing Service.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-billing-proxy
+  namespace: default
+  labels:
+    app: llm-billing-proxy
+spec:
+  selector:
+    app: llm-billing-proxy  # ← must match your Deployment/Pod labels
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
