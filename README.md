@@ -13,10 +13,13 @@ HTTP proxy that sits between end users and LLM servers and bills them per token.
 python3 -m venv venv
 source venv/bin/activate
 
-sqlite3 db.sqlite < llmproxy/schema.sql
-
 python3 -m llmproxy
 ```
+
+The SQLite schema is created automatically on first run (and by
+`llmproxyctl`). You can pre-create it with `sqlite3 db.sqlite <
+llmproxy/schema.sql`, but that step is optional; the schema script is
+idempotent.
 
 ## Configuration
 
@@ -166,7 +169,9 @@ repository and file.
 ### SQLite
 
 1. Create an SQLite database according to
-   [llmproxy/schema.sql](llmproxy/schema.sql).
+   [llmproxy/schema.sql](llmproxy/schema.sql). This is optional: the proxy
+   creates the schema automatically on first run. To pre-create it (the script
+   is idempotent):
 
 ```sh
 sqlite3 db.sqlite < llmproxy/schema.sql

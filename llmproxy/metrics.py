@@ -114,22 +114,36 @@ AUDIO_SECONDS_TOTAL = prometheus_client.Counter(
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Known paths — keeps label cardinality bounded.  Anything else is
-# collapsed to "unknown" to prevent a malicious or buggy client from
-# inflating the label space.
-_KNOWN_PATHS = frozenset({
-    "/v1/chat/completions",
-    "/v1/completions",
-    "/v1/models",
-    "/v1/embeddings",
-    "/v1/audio/transcriptions",
-    "/metrics",
-})
+def _normalize_path(path, known_paths):
+    """Map a request path to a low-cardinality label value.
+
+    ``known_paths`` is the set of static routes the app actually serves, derived
+    from the router in ``create_app`` (``app["known_paths"]``) rather than a
+    hand-maintained list, so a newly registered endpoint is instrumented
+    automatically and can never silently drift out of the metric. Anything not
+    served — 404s, health probes, random paths — collapses to ``"unknown"`` so a
+    malicious or buggy client cannot inflate the label space.
+    """
+    return path if path in known_paths else "unknown"
 
 
-def _normalize_path(path):
-    """Map a request path to a low-cardinality label value."""
-    return path if path in _KNOWN_PATHS else "unknown"
+def observe_text_tokens(model, prompt_tokens, completion_tokens):
+    """Record prompt/completion token usage for a text-generation endpoint.
+
+    Shared by chat, messages and responses so that a text endpoint which bills
+    tokens cannot silently omit them from ``llmproxy_tokens_total`` — the gap
+    that previously left /v1/messages and /v1/responses uncounted.
+
+    Separate from ``billing.record`` on purpose: the two have different failure
+    policies (billing writes per-request rows and may abort the worker on a DB
+    error; this counter is best-effort and process-global). Callers invoke it
+    AFTER billing has committed, so a metrics error can never prevent the bill.
+    Counts are coerced to int (token counts are integers) so a stray Decimal —
+    billable as Decimal128 on Mongo — cannot raise inside ``.inc()`` and turn an
+    already-billed request into a 500.
+    """
+    TOKENS_TOTAL.labels(model, "prompt").inc(int(prompt_tokens))
+    TOKENS_TOTAL.labels(model, "completion").inc(int(completion_tokens))
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +174,8 @@ async def metrics_middleware(req, handler):
     finally:
         duration = time.monotonic() - start
         ACTIVE_REQUESTS.dec()
-        path = _normalize_path(req.rel_url.path)
+        path = _normalize_path(req.rel_url.path,
+            req.app.get("known_paths") or frozenset())
         labels = (req.method, path, str(status))
         REQUESTS_TOTAL.labels(*labels).inc()
         REQUEST_DURATION_SECONDS.labels(*labels).observe(duration)

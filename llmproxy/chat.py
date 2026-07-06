@@ -74,10 +74,8 @@ async def chat(f_req):
             usage["prompt_tokens"], usage["completion_tokens"],
             b_name)
 
-        metrics.TOKENS_TOTAL.labels(b_name, "prompt").inc(
-            usage["prompt_tokens"])
-        metrics.TOKENS_TOTAL.labels(b_name, "completion").inc(
-            usage["completion_tokens"])
+        metrics.observe_text_tokens(b_name,
+            usage["prompt_tokens"], usage["completion_tokens"])
 
         return f_res
 

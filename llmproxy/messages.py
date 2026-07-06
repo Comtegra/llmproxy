@@ -17,7 +17,7 @@ import json
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, proxy, streaming
+from . import auth, billing, metrics, proxy, streaming
 
 
 def _input_tokens(usage):
@@ -106,5 +106,8 @@ async def messages(f_req):
 
         app.logger.info("Client used (messages): P:%d C:%d of %s",
             usage["prompt_tokens"], usage["completion_tokens"], b_name)
+
+        metrics.observe_text_tokens(b_name,
+            usage["prompt_tokens"], usage["completion_tokens"])
 
         return f_res
