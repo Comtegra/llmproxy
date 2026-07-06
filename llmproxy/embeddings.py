@@ -1,12 +1,9 @@
-import datetime
 import decimal
 import json
 
 import aiohttp
 
-from . import auth, proxy
-from . import metrics
-from .db import DatabaseError, get_db
+from . import auth, billing, metrics, proxy
 
 
 # Frontend related variables are prefixed with f_.
@@ -29,23 +26,13 @@ async def embeddings(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
         usage = data["usage"]
 
-        db = await get_db(app["config"]["db"]["uri"], f_req)
-        res = {"%s/%s/embedding" % (b_name, b_cfg["device"]):
-            usage["prompt_tokens"]}
-        try:
-            await db.billing_record_add(
-                user=user,
-                time=datetime.datetime.now(datetime.UTC),
-                resources=res,
-                request_id=f_req["request_id"],
-            )
-        except DatabaseError as e:
-            app.logger.critical(e)
-            raise aiohttp.web.GracefulExit() from e
+        await billing.record(f_req, user, {
+            "%s/%s/embedding" % (b_name, b_cfg["device"]):
+                usage["prompt_tokens"],
+        })
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
-            usage["prompt_tokens"], 0,
-            b_name)
+            usage["prompt_tokens"], 0, b_name)
 
         metrics.TOKENS_TOTAL.labels(b_name, "embedding").inc(
             usage["prompt_tokens"])

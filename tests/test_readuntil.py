@@ -3,7 +3,7 @@ import unittest
 import aiohttp
 import aiohttp.test_utils
 
-from llmproxy.chat import readuntil
+from llmproxy.streaming import readuntil
 
 
 class TestReaduntil(aiohttp.test_utils.AioHTTPTestCase):

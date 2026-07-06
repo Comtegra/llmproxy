@@ -1,4 +1,3 @@
-import datetime
 import decimal
 import json
 import logging
@@ -6,60 +5,31 @@ import logging
 import aiohttp
 import aiohttp.web
 
-from . import auth, proxy
-from . import metrics
-from .db import DatabaseError, get_db
+from . import auth, billing, metrics, proxy, streaming
 
 
-async def readuntil(stream, separator: bytes = b"\n") -> bytes:
-    result = bytearray()
-    while not result.endswith(separator):
-        b = await stream.read(1)
-        if not b:
-            break
-        result += b
+class _ChatStreamUsage:
+    """on_chunk accumulator for OpenAI chat streams: keep the last non-[DONE]
+    SSE block and expose its ``usage`` object. OpenAI reports usage in the final
+    chunk when ``stream_options.include_usage`` is set, so keeping the last block
+    also captures a usage chunk that arrives separately after ``finish_reason``.
+    """
 
-    return result
+    def __init__(self):
+        self._last = b""
 
+    def __call__(self, chunk):
+        if chunk != b"data: [DONE]\n\n":
+            self._last = chunk
 
-async def handle_resp_stream(f_req, b_res):
-    app = f_req.app
-    headers = {"Content-Type":
-        b_res.headers.get("Content-Type", "application/octet-stream")}
-    headers["X-Request-ID"] = str(f_req["request_id"])
-    f_res = aiohttp.web.StreamResponse(headers=headers)
-
-    f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    if o := app["config"].get("http_origin"):
-        f_res.headers["Access-Control-Allow-Origin"] = o
-
-    last = b""
-
-    try:
-        await f_res.prepare(f_req)
-        while (c := await readuntil(b_res.content, b"\n\n")):
-            if c != b"data: [DONE]\n\n":
-                logging.debug("Received chunk: %s", c)
-                last = c
-            await f_res.write(c)
-        await f_res.write_eof()
-    except OSError as e:
-        app.logger.info("Client disconnected: %s", e)
-
-    while (c := await readuntil(b_res.content, b"\n\n")):
-        if c != b"data: [DONE]\n\n":
-            logging.debug("Received chunk after client disconnected: %s", c)
-            last = c
-
-    _, _, body_raw = last.partition(b" ")
-
-    try:
-        body = json.loads(body_raw, parse_float=decimal.Decimal)
-    except json.decoder.JSONDecodeError:
-        app.logger.error("Failed parsing usage information: %s", body_raw)
-        raise
-
-    return f_res, body["usage"]
+    def usage(self):
+        _, _, raw = self._last.partition(b" ")
+        try:
+            data = json.loads(raw, parse_float=decimal.Decimal)
+        except json.JSONDecodeError:
+            logging.error("Failed parsing usage information: %s", raw)
+            raise
+        return data["usage"]
 
 
 def force_include_usage(body):
@@ -81,8 +51,10 @@ async def chat(f_req):
         await proxy.check_response(app, b_name, b_res,
             request_id=f_req["request_id"])
 
-        if b_res.headers.get("Transfer-Encoding", "") == "chunked":
-            f_res, usage = await handle_resp_stream(f_req, b_res)
+        if "text/event-stream" in b_res.headers.get("Content-Type", ""):
+            usage_acc = _ChatStreamUsage()
+            f_res = await streaming.stream_through(f_req, b_res, usage_acc)
+            usage = usage_acc.usage()
         else:
             body = await b_res.content.read()
             data = json.loads(body, parse_float=decimal.Decimal)
@@ -91,23 +63,12 @@ async def chat(f_req):
             f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
             usage = data["usage"]
 
-        db = await get_db(app["config"]["db"]["uri"], f_req)
-        res = {
+        await billing.record(f_req, user, {
             "%s/%s/prompt" % (b_name, b_cfg["device"]):
                 usage["prompt_tokens"],
             "%s/%s/completion" % (b_name, b_cfg["device"]):
                 usage["completion_tokens"],
-        }
-        try:
-            await db.billing_record_add(
-                user=user,
-                time=datetime.datetime.now(datetime.UTC),
-                resources=res,
-                request_id=f_req["request_id"],
-            )
-        except DatabaseError as e:
-            app.logger.critical(e)
-            raise aiohttp.web.GracefulExit() from e
+        })
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
             usage["prompt_tokens"], usage["completion_tokens"],

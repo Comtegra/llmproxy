@@ -39,6 +39,7 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         app = await create_app({
             "timeout_connect": 1,
             "timeout_read": 1,
+            "max_json_body": 1024 * 1024,
             "db": {"uri": "sqlite://%s" % self.db_path},
             "backends": {
                 "mymodel": {
@@ -55,6 +56,14 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
                     "device": "none",
                     "model": "mymodel",
                     "verify_ssl": False,
+                },
+                "slowok": {
+                    "url": "http://%s:%d" % (
+                        self.backend.host, self.backend.port),
+                    "token": "mybackendtoken",
+                    "device": "none",
+                    "model": "mymodel",
+                    "timeout": 5,
                 },
             },
         })
@@ -228,6 +237,203 @@ class TestChat(LLMProxyAppTestCase):
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
 
+    async def test_embeddings_billing(self):
+        body = {"model": "mymodel", "input": "hello"}
+        req = self.client.request("POST", "/v1/embeddings",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        self.assertEqual(data["usage"]["prompt_tokens"], 7)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/embedding", "quantity": 7},
+        ])
+
+    async def test_audio_transcription_billing(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("file", b"RIFFfake-audio", filename="a.wav",
+            content_type="audio/wav")
+        req = self.client.request("POST", "/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+
+        # Billed per second of audio; fractional durations must survive.
+        self.assertEqual(data["duration"], 12.5)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/transcription", "quantity": 12.5},
+        ])
+
+    async def test_streaming_usage_in_trailing_chunk(self):
+        # Realistic vLLM: usage arrives in a separate trailing chunk, not the
+        # content chunk. The proxy must keep the last non-[DONE] chunk.
+        body = {"model": "mymodel", "stream": True,
+            "_stream_mode": "split_usage",
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            text = await res.text()
+            self.assertIn("data: [DONE]", text)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/prompt", "quantity": 1},
+            {"product": "mymodel/none/completion", "quantity": 2},
+        ])
+
+    async def test_per_backend_timeout_allows_slow_backend(self):
+        # Global sock_read=1 would 504 a 2s backend; a backend with a long
+        # per-backend timeout waits and still bills.
+        body = {"model": "slowok", "_trigger_error": "slow",
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "slowok/none/prompt", "quantity": 1},
+            {"product": "slowok/none/completion", "quantity": 2},
+        ])
+
+    async def test_large_audio_upload_accepted(self):
+        # A >1 MiB upload must not be rejected: aiohttp's default client_max_size
+        # is 1 MiB, and the app raises it so audio works.
+        big = b"\x00" * (2 * 1024 * 1024)
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("file", big, filename="a.wav",
+            content_type="audio/wav")
+        req = self.client.request("POST", "/v1/audio/transcriptions",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/transcription", "quantity": 12.5},
+        ])
+
+    async def test_unbillable_duration_fails_loud(self):
+        # Missing, zero, negative, NaN and Infinity durations are all
+        # unbillable -> 502 + no billing (never a corrupt or zero billing row).
+        cases = [("_omit_duration", "1"), ("_duration", "zero"),
+            ("_duration", "neg"), ("_duration", "nan"), ("_duration", "inf"),
+            ("_duration", "true")]
+        for field, value in cases:
+            with self.subTest(case=value):
+                form = aiohttp.FormData()
+                form.add_field("model", "mymodel")
+                form.add_field(field, value)
+                form.add_field("file", b"RIFFfake", filename="a.wav",
+                    content_type="audio/wav")
+                req = self.client.request("POST", "/v1/audio/transcriptions",
+                    headers={"Authorization": "Bearer mytoken"}, data=form)
+
+                async with req as res:
+                    self.assertEqual(res.status, 502)
+
+                self.assertListEqual(await self.get_events(), [])
+
+    async def test_oversized_json_body_rejected(self):
+        # A JSON body over max_json_body is rejected with 413 before it is
+        # buffered, protecting the text endpoints from a memory-exhaustion DoS.
+        big = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "x" * (2 * 1024 * 1024)}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=big)
+
+        async with req as res:
+            self.assertEqual(res.status, 413)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_oversized_chunked_body_rejected(self):
+        # The cap must also hold for a chunked body (no Content-Length), which
+        # would slip past a Content-Length-only check.
+        async def gen():
+            for _ in range(2 * 1024):  # ~2 MiB in 1 KiB chunks
+                yield b"x" * 1024
+
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken",
+                "Content-Type": "application/json"}, data=gen())
+
+        async with req as res:
+            self.assertEqual(res.status, 413)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    @staticmethod
+    def _multipart_form():
+        # A file field (filename set) forces real multipart/form-data encoding;
+        # a form of plain string fields would be sent as urlencoded, which
+        # proxy.request already rejects on a different path.
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("payload", b"x" * 4096, filename="p.bin",
+            content_type="application/octet-stream")
+        return form
+
+    async def test_multipart_rejected_on_text_endpoints(self):
+        # multipart on a JSON endpoint is rejected with 415 in the middleware,
+        # BEFORE proxy.request would call post() and buffer the whole body into
+        # memory (aiohttp's post() reads each non-file field WHOLE before the
+        # size cap is checked -> an authenticated client could OOM the single
+        # worker). Without the guard these reach post()+the backend and 502;
+        # the 415 (not 502) proves the body was never read and bills nothing.
+        for path in ("/v1/chat/completions", "/v1/completions",
+                "/v1/embeddings", "/v1/messages", "/v1/responses"):
+            with self.subTest(path=path):
+                req = self.client.request("POST", path,
+                    headers={"Authorization": "Bearer mytoken"},
+                    data=self._multipart_form())
+
+                async with req as res:
+                    self.assertEqual(res.status, 415)
+                    self.assertIn("X-Request-ID", res.headers)
+
+                self.assertListEqual(await self.get_events(), [])
+
+    async def test_multipart_rejected_before_auth(self):
+        # The guard lives in limit_request_body, ahead of the handler's auth,
+        # so the DoS vector is dropped without even a DB auth lookup: an INVALID
+        # token still yields 415, not 401 (which is what it would be if the
+        # multipart body reached the handler's auth+post()).
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer badtoken"},
+            data=self._multipart_form())
+
+        async with req as res:
+            self.assertEqual(res.status, 415)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_chunked_nonstream_billed_via_nonstream_path(self):
+        # Streaming is detected by Content-Type, not Transfer-Encoding: a
+        # non-stream JSON body arriving chunked (buffering proxy / HTTP-2)
+        # must still be billed via the non-stream path, not silently dropped.
+        body = {"model": "mymodel", "_chunked_nonstream": True,
+            "messages": [{"role": "user", "content": "hi"}]}
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/prompt", "quantity": 1},
+            {"product": "mymodel/none/completion", "quantity": 2},
+        ])
+
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_positive_integer_max_model_len(self):
@@ -240,6 +446,25 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
                     config.validate({
                         "backends": {"mymodel": {"max_model_len": value}},
                     })
+
+    def test_validate_rejects_invalid_body_limits(self):
+        for key in ("client_max_size", "max_json_body"):
+            for value in (0, -1, "100", True):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(config.ConfigError):
+                        config.validate({key: value})
+
+    def test_validate_rejects_invalid_backend_timeout(self):
+        for value in (0, -1, "5", True):
+            with self.subTest(value=value):
+                with self.assertRaises(config.ConfigError):
+                    config.validate({"backends": {"m": {"timeout": value}}})
+
+    def test_validate_accepts_valid_timeout_and_client_max_size(self):
+        config.validate({
+            "client_max_size": 2147483648,
+            "backends": {"m": {"timeout": 1800}, "n": {"timeout": 0.5}},
+        })
 
     def test_load_invalid_toml_raises_config_error(self):
         fd, path = tempfile.mkstemp(suffix=".toml")

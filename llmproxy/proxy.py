@@ -75,9 +75,15 @@ async def request(f_req, body_transform=None):
     try:
         app.logger.debug("Sending backend request")
         ssl = None if b_cfg.get("verify_ssl", True) else False
+        # Per-backend response timeout overrides the global sock_read (e.g. audio
+        # transcription is silent for minutes; the global timeout would 504 it).
+        timeout = aiohttp.ClientTimeout(
+            connect=app["config"]["timeout_connect"],
+            sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
         b_start = time.monotonic()
         async with app["client"].post(
-                b_url, headers=b_hdrs, data=b_body, ssl=ssl) as b_res:
+                b_url, headers=b_hdrs, data=b_body, ssl=ssl,
+                timeout=timeout) as b_res:
             metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
                 time.monotonic() - b_start)
             metrics.BACKEND_REQUESTS_TOTAL.labels(

@@ -14,6 +14,21 @@ async def chat(req):
     if b["model"] != "mymodel":
         raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
 
+    if b.get("_chunked_nonstream"):
+        # Non-stream JSON delivered with chunked Transfer-Encoding (as a
+        # buffering reverse proxy / HTTP-2 hop might re-frame it). Content-Type
+        # stays application/json, so the proxy must NOT misdetect it as a
+        # stream (which would silently drop billing).
+        res = aiohttp.web.StreamResponse(
+            headers={"Content-Type": "application/json"})
+        res.enable_chunked_encoding()
+        await res.prepare(req)
+        await res.write(json.dumps({
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}}).encode())
+        await res.write_eof()
+        return res
+
     if (err := b.get("_trigger_error")) is not None:
         if err == "context500":
             return aiohttp.web.json_response(
@@ -44,18 +59,7 @@ async def chat(req):
     msg = b["messages"][0]["content"]
 
     if b.get("stream"):
-        res = aiohttp.web.StreamResponse(
-            headers={"Content-Type": "text/event-stream"})
-        res.enable_chunked_encoding()
-        await res.prepare(req)
-        chunk = {
-            "choices": [{"delta": {"content": "hi"}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 2},
-        }
-        await res.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
-        await res.write(b"data: [DONE]\n\n")
-        await res.write_eof()
-        return res
+        return await _chat_stream(req, msg, b.get("_stream_mode"))
 
     return aiohttp.web.json_response({
         "usage": {"prompt_tokens": 1, "completion_tokens": 2},
@@ -63,10 +67,157 @@ async def chat(req):
     })
 
 
+async def _chat_stream(req, msg, mode):
+    res = aiohttp.web.StreamResponse(
+        headers={"Content-Type": "text/event-stream"})
+    res.enable_chunked_encoding()
+    await res.prepare(req)
+
+    async def send(obj):
+        await res.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
+
+    if mode == "split_usage":
+        # Realistic vLLM: content chunk carries finish_reason but NO usage;
+        # usage arrives in a SEPARATE trailing chunk with empty choices.
+        await send({"choices": [{"delta": {"content": "hi"},
+            "finish_reason": "stop"}]})
+        await send({"choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}})
+    else:
+        # Default: a single chunk carrying both content and usage.
+        await send({"choices": [{"delta": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}})
+
+    await res.write(b"data: [DONE]\n\n")
+    await res.write_eof()
+    return res
+
+
+async def embeddings(req):
+    b = await req.json()
+    if b["model"] != "mymodel":
+        raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
+
+    return aiohttp.web.json_response({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0,
+            "embedding": [0.1, 0.2, 0.3]}],
+        "usage": {"prompt_tokens": 7, "total_tokens": 7},
+    })
+
+
+async def transcriptions(req):
+    # Multipart in. The proxy forces response_format=verbose_json and bills the
+    # top-level `duration`. Fractional on purpose to exercise Decimal handling.
+    post = await req.post()
+
+    if post.get("_omit_duration"):
+        # Simulate a backend that fails to report a billable duration.
+        return aiohttp.web.json_response({
+            "task": "transcribe", "language": "pl", "text": "no duration"})
+
+    # Inject unbillable durations to exercise the proxy guard. json_response
+    # emits bare NaN/Infinity (json.dumps allow_nan default), just like a real
+    # Python backend serialized with the default settings.
+    unbillable = {"zero": 0, "neg": -5, "nan": float("nan"),
+        "inf": float("inf"), "true": True}
+    duration = unbillable.get(post.get("_duration"), 12.5)
+
+    return aiohttp.web.json_response({
+        "task": "transcribe",
+        "language": "pl",
+        "duration": duration,
+        "text": "you said something",
+        "segments": [],
+    })
+
+
+async def _sse(req, events):
+    res = aiohttp.web.StreamResponse(
+        headers={"Content-Type": "text/event-stream"})
+    res.enable_chunked_encoding()
+    await res.prepare(req)
+    for event, obj in events:
+        await res.write(b"event: " + event.encode() + b"\ndata: "
+            + json.dumps(obj).encode() + b"\n\n")
+    await res.write_eof()
+    return res
+
+
+async def messages(req):
+    b = await req.json()
+    if b["model"] != "mymodel":
+        raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
+
+    if b.get("stream"):
+        # Anthropic splits usage: input (+cache) in message_start, cumulative
+        # output in the final message_delta.
+        return await _sse(req, [
+            ("message_start", {"type": "message_start",
+                "message": {"usage": {"input_tokens": 3, "output_tokens": 1}}}),
+            ("content_block_delta", {"type": "content_block_delta",
+                "delta": {"text": "hi"}}),
+            ("message_delta", {"type": "message_delta",
+                "usage": {"output_tokens": 5}}),
+            ("message_stop", {"type": "message_stop"}),
+        ])
+
+    if b.get("_no_usage"):
+        # 200 without a usage object -> the proxy must fail loud, not bill 0.
+        return aiohttp.web.json_response({
+            "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}]})
+
+    if b.get("_no_input"):
+        # usage present but missing input_tokens -> fail loud, not prompt=0.
+        return aiohttp.web.json_response({
+            "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"output_tokens": 5}})
+
+    return aiohttp.web.json_response({
+        "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+    })
+
+
+async def responses(req):
+    b = await req.json()
+    if b["model"] != "mymodel":
+        raise aiohttp.web_exceptions.HTTPBadRequest(body="bad model")
+
+    if b.get("stream"):
+        # Usage only in the terminal event; no [DONE]. `_terminal` lets tests
+        # end the stream with response.completed / .incomplete / .failed.
+        terminal = b.get("_terminal", "response.completed")
+        return await _sse(req, [
+            ("response.created", {"type": "response.created",
+                "response": {"id": "resp_1"}}),
+            ("response.output_text.delta",
+                {"type": "response.output_text.delta", "delta": "hi"}),
+            (terminal, {"type": terminal,
+                "response": {"usage":
+                    {"input_tokens": 7, "output_tokens": 9}}}),
+        ])
+
+    return aiohttp.web.json_response({
+        "object": "response",
+        "output": [{"type": "message",
+            "content": [{"type": "output_text", "text": "hi"}]}],
+        "usage": {"input_tokens": 7, "output_tokens": 9},
+    })
+
+
 def create_app():
-    app = aiohttp.web.Application()
+    # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
+    app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3)
     app.add_routes([
         aiohttp.web.get("/health", health),
         aiohttp.web.post("/v1/chat/completions", chat),
+        aiohttp.web.post("/v1/embeddings", embeddings),
+        aiohttp.web.post("/v1/audio/transcriptions", transcriptions),
+        aiohttp.web.post("/v1/messages", messages),
+        aiohttp.web.post("/v1/responses", responses),
     ])
     return app
