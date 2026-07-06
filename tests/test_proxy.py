@@ -657,3 +657,90 @@ class TestMetrics(LLMProxyAppTestCase):
             for line in parsed.get("llmproxy_requests_total", [])
         )
         self.assertTrue(found, "metrics endpoint not counted")
+
+    async def test_new_endpoints_get_their_own_path_label(self):
+        """/v1/messages and /v1/responses are registered routes, so they must be
+        labelled by their real path, not collapsed to "unknown"."""
+        for path, body in (
+            ("/v1/messages", {"model": "mymodel", "max_tokens": 4,
+                "messages": [{"role": "user", "content": "hi"}]}),
+            ("/v1/responses", {"model": "mymodel", "input": "hi"}),
+        ):
+            async with self.client.request("POST", path,
+                    headers={"Authorization": "Bearer mytoken"},
+                    json=body) as res:
+                self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+
+        lines = parsed.get("llmproxy_requests_total", [])
+        for path in ("/v1/messages", "/v1/responses"):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    any('path="%s"' % path in line for line in lines),
+                    "requests_total missing path=%s (collapsed to unknown?)"
+                        % path)
+
+    async def test_text_endpoints_increment_token_counter(self):
+        """chat, messages and responses must each add their billed prompt/
+        completion token counts to llmproxy_tokens_total, for both streaming and
+        non-streaming responses (previously only chat/embeddings did). The
+        registry is process-global, so assert on the delta measured around each
+        individual call."""
+        def token_value(parsed, type_):
+            for line in parsed.get("llmproxy_tokens_total", []):
+                if 'model="mymodel"' in line and 'type="%s"' % type_ in line:
+                    return float(line.rsplit(" ", 1)[1])
+            return 0.0
+
+        async def scrape():
+            async with self.client.request("GET", "/metrics") as res:
+                return _parse_metrics(await res.text())
+
+        # Mock backend usage is identical stream and non-stream:
+        # chat 1/2, messages 3/5, responses 7/9.
+        cases = [
+            ("/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "hi"}]}, 1, 2),
+            ("/v1/messages",
+                {"max_tokens": 4,
+                    "messages": [{"role": "user", "content": "hi"}]}, 3, 5),
+            ("/v1/responses", {"input": "hi"}, 7, 9),
+        ]
+        for path, extra, exp_prompt, exp_completion in cases:
+            for stream in (False, True):
+                with self.subTest(path=path, stream=stream):
+                    before = await scrape()
+                    p0 = token_value(before, "prompt")
+                    c0 = token_value(before, "completion")
+
+                    body = {"model": "mymodel", "stream": stream, **extra}
+                    async with self.client.request("POST", path,
+                            headers={"Authorization": "Bearer mytoken"},
+                            json=body) as res:
+                        self.assertEqual(res.status, 200)
+                        await res.read()  # drain streaming body so billing runs
+
+                    after = await scrape()
+                    self.assertEqual(
+                        token_value(after, "prompt") - p0, exp_prompt)
+                    self.assertEqual(
+                        token_value(after, "completion") - c0, exp_completion)
+
+    async def test_unknown_path_collapses_to_unknown_label(self):
+        """An unregistered path must collapse to path="unknown" so a client
+        hammering random paths cannot inflate the label cardinality."""
+        async with self.client.request("GET", "/no/such/route",
+                headers={"Authorization": "Bearer mytoken"}) as res:
+            self.assertEqual(res.status, 404)
+
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+
+        lines = parsed.get("llmproxy_requests_total", [])
+        self.assertTrue(any('path="unknown"' in line for line in lines),
+            "unregistered path should be counted under path=unknown")
+        self.assertFalse(
+            any('path="/no/such/route"' in line for line in lines),
+            "raw unknown path must not get its own series")

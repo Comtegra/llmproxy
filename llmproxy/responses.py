@@ -19,7 +19,7 @@ import json
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, proxy, streaming
+from . import auth, billing, metrics, proxy, streaming
 
 
 # Terminal Responses events carrying final usage. `response.incomplete`
@@ -158,6 +158,9 @@ async def responses(f_req):
 
             app.logger.info("Client used (responses): P:%d C:%d of %s",
                 billed["prompt_tokens"], billed["completion_tokens"], b_name)
+
+            metrics.observe_text_tokens(b_name,
+                billed["prompt_tokens"], billed["completion_tokens"])
 
             return f_res
     except StatefulNotSupported as e:

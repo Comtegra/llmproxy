@@ -156,6 +156,17 @@ async def create_app(cfg):
 
     app.add_routes(routes)
 
+    # The metrics middleware bounds its `path` label to the routes we actually
+    # serve; derive that set from the router (not a hand-maintained list) so a
+    # newly added endpoint is instrumented automatically and can never drift out
+    # of the metric. Static resources only (skip any future dynamic "{var}"
+    # routes, whose full paths would be unbounded label cardinality).
+    app["known_paths"] = frozenset(
+        resource.canonical
+        for resource in app.router.resources()
+        if "{" not in resource.canonical
+    )
+
     app["config"] = cfg
 
     await check_db(app)
