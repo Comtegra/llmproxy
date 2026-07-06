@@ -22,6 +22,15 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 # This value will be sent in the Access-Control-Allow-Origin response header.
 http_origin = "*"
 
+[metrics]
+
+# Prometheus metrics endpoint.
+# Set enabled = false to disable the /metrics endpoint entirely.
+enabled = true
+
+# Path under which the metrics endpoint is served.
+path = "/metrics"
+
 [db]
 
 # Database URI

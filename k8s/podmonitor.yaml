@@ -1,0 +1,32 @@
+# PodMonitor for Prometheus Operator (alternative to ServiceMonitor).
+#
+# Use this ONLY if llmproxy is deployed as a Pod without a Kubernetes
+# Service.  If you have a Service, use servicemonitor.yaml instead —
+# ServiceMonitor is the recommended approach.
+#
+#   kubectl apply -f k8s/podmonitor.yaml
+#
+# Same label-matching gotcha applies — see servicemonitor.yaml comments.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: llmproxy
+  namespace: default  # ← change to the namespace where llmproxy runs
+  labels:
+    release: kube-prometheus-stack  # ← match your Prometheus selector
+    app: llm-billing-proxy
+spec:
+  podMetricsEndpoints:
+    - port: http
+      # If the container port is named "http", use the name above.
+      # If it uses a numeric port, use:
+      #   targetPort: 8080
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+  selector:
+    matchLabels:
+      # This must match the labels on your llmproxy Pod/Deployment.
+      # Adjust if your pods use different labels.
+      app: llm-billing-proxy

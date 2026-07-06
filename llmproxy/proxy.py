@@ -1,8 +1,11 @@
 import contextlib
 import json
+import time
 
 import aiohttp
 import yarl
+
+from . import metrics
 
 
 CONTEXT_LENGTH_MARKERS = (
@@ -77,21 +80,35 @@ async def request(f_req, body_transform=None):
         timeout = aiohttp.ClientTimeout(
             connect=app["config"]["timeout_connect"],
             sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
+        b_start = time.monotonic()
         async with app["client"].post(
                 b_url, headers=b_hdrs, data=b_body, ssl=ssl,
                 timeout=timeout) as b_res:
+            metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+                time.monotonic() - b_start)
+            metrics.BACKEND_REQUESTS_TOTAL.labels(
+                b_name, str(b_res.status)).inc()
             yield b_res, b_name, b_cfg
     except aiohttp.ServerTimeoutError as e:
+        metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+            time.monotonic() - b_start)
+        metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "timeout").inc()
         app.logger.error("Backend timeout: request_id=%s model=%s error=%s",
             f_req["request_id"], b_name, e)
         raise aiohttp.web.HTTPGatewayTimeout() from e
     except (aiohttp.ClientConnectorError, aiohttp.ServerConnectionError,
             aiohttp.ClientPayloadError, aiohttp.ClientResponseError,
             aiohttp.InvalidURL) as e:
+        metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+            time.monotonic() - b_start)
+        metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "connection").inc()
         app.logger.error("Backend error: request_id=%s model=%s error=%s",
             f_req["request_id"], b_name, e)
         raise aiohttp.web.HTTPBadGateway() from e
     except aiohttp.ClientError as e:
+        metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+            time.monotonic() - b_start)
+        metrics.BACKEND_ERRORS_TOTAL.labels(b_name, "client_error").inc()
         app.logger.error("HTTP client error: request_id=%s model=%s error=%s",
             f_req["request_id"], b_name, e)
         raise aiohttp.web.HTTPInternalServerError() from e

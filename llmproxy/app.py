@@ -11,7 +11,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import audio, chat, config, embeddings, messages, responses
+from . import audio, chat, config, embeddings, messages, metrics, responses
 from .db import get_db
 
 
@@ -129,6 +129,7 @@ async def create_app(cfg):
     app = aiohttp.web.Application(
         client_max_size=cfg.get("client_max_size", 2 * 1024 ** 3),
         middlewares=[
+            metrics.metrics_middleware,
             assign_request_id,
             add_request_id_header,
             add_cors_headers,
@@ -136,7 +137,7 @@ async def create_app(cfg):
             limit_request_body,
         ])
 
-    app.add_routes([
+    routes = [
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.post("/v1/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
@@ -144,7 +145,16 @@ async def create_app(cfg):
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
         aiohttp.web.post("/v1/messages", messages.messages),
         aiohttp.web.post("/v1/responses", responses.responses),
-    ])
+    ]
+
+    # Prometheus metrics endpoint.  The path is configurable; defaults
+    # to "/metrics".  When disabled the endpoint is simply not registered.
+    metrics_cfg = cfg.get("metrics", {})
+    if metrics_cfg.get("enabled", True):
+        metrics_path = metrics_cfg.get("path", "/metrics")
+        routes.append(aiohttp.web.get(metrics_path, metrics.metrics_handler))
+
+    app.add_routes(routes)
 
     app["config"] = cfg
 

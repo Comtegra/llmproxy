@@ -3,7 +3,7 @@ import json
 
 import aiohttp
 
-from . import auth, billing, proxy
+from . import auth, billing, metrics, proxy
 
 
 # Frontend related variables are prefixed with f_.
@@ -33,5 +33,8 @@ async def embeddings(f_req):
 
         app.logger.info("Client used: P:%d C:%d tokens of %s",
             usage["prompt_tokens"], 0, b_name)
+
+        metrics.TOKENS_TOTAL.labels(b_name, "embedding").inc(
+            usage["prompt_tokens"])
 
         return f_res

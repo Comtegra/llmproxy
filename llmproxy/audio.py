@@ -4,7 +4,7 @@ import math
 
 import aiohttp
 
-from . import auth, billing, proxy
+from . import auth, billing, metrics, proxy
 
 
 def force_verbose(body):
@@ -53,5 +53,7 @@ async def transcriptions(f_req):
         })
 
         app.logger.info("Client used: %d s of %s", duration, b_name)
+
+        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(float(duration))
 
         return f_res
