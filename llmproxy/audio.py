@@ -1,12 +1,10 @@
-import datetime
 import decimal
 import json
+import math
 
 import aiohttp
 
-from . import auth, proxy
-from . import metrics
-from .db import DatabaseError, get_db
+from . import auth, billing, metrics, proxy
 
 
 def force_verbose(body):
@@ -31,26 +29,31 @@ async def transcriptions(f_req):
 
         body = await b_res.content.read()
         data = json.loads(body, parse_float=decimal.Decimal)
+
+        # Duration (seconds) is the only billable quantity for transcription. If
+        # the backend omits it or reports <= 0 we cannot bill, so fail loud with
+        # a 502 + log instead of a 500-after-response with the request unbilled.
+        duration = data.get("duration")
+        if (not isinstance(duration, (int, float, decimal.Decimal))
+                or isinstance(duration, bool)
+                or not math.isfinite(duration)
+                or duration <= 0):
+            app.logger.error(
+                "Transcription backend %s returned no billable duration: "
+                "request_id=%s", b_name, f_req["request_id"])
+            raise aiohttp.web.HTTPBadGateway(
+                text="Transcription backend returned no duration")
+
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/octet-stream")}
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
-        db = await get_db(app["config"]["db"]["uri"], f_req)
-        res = {"%s/%s/transcription" % (b_name, b_cfg["device"]):
-            data["duration"]}
-        try:
-            await db.billing_record_add(
-                user=user,
-                time=datetime.datetime.now(datetime.UTC),
-                resources=res,
-                request_id=f_req["request_id"],
-            )
-        except DatabaseError as e:
-            app.logger.critical(e)
-            raise aiohttp.web.GracefulExit() from e
+        await billing.record(f_req, user, {
+            "%s/%s/transcription" % (b_name, b_cfg["device"]): duration,
+        })
 
-        app.logger.info("Client used: %d s of %s", data["duration"], b_name)
+        app.logger.info("Client used: %d s of %s", duration, b_name)
 
-        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(data["duration"])
+        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(float(duration))
 
         return f_res

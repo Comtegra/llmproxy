@@ -9,15 +9,25 @@ class ConfigError(Exception):
 
 
 def validate(cfg):
-    for name, meta in cfg.get("backends", {}).items():
-        if "max_model_len" not in meta:
-            continue
+    for key in ("client_max_size", "max_json_body"):
+        if key in cfg:
+            value = cfg[key]
+            if type(value) is not int or value <= 0:
+                raise ConfigError("%s must be a positive integer" % key)
 
-        value = meta["max_model_len"]
-        if type(value) is not int or value <= 0:
-            raise ConfigError(
-                'Backend "%s" max_model_len must be a positive integer' %
-                name)
+    for name, meta in cfg.get("backends", {}).items():
+        if "max_model_len" in meta:
+            value = meta["max_model_len"]
+            if type(value) is not int or value <= 0:
+                raise ConfigError(
+                    'Backend "%s" max_model_len must be a positive integer' %
+                    name)
+
+        if "timeout" in meta:
+            value = meta["timeout"]
+            if type(value) not in (int, float) or value <= 0:
+                raise ConfigError(
+                    'Backend "%s" timeout must be a positive number' % name)
 
 
 def load(path=None, create=False):

@@ -7,7 +7,16 @@ port = 8080
 
 # Backend timeouts
 timeout_connect = 5  # connection timeout
-timeout_read = 60  # response timeout
+timeout_read = 60  # response timeout (global default sock_read; override per-backend)
+
+# Maximum accepted request body size in bytes. Default is 2 GiB so audio
+# uploads work; lower it if this proxy only serves text endpoints.
+#client_max_size = 2147483648
+
+# Maximum request body (bytes) for non-audio endpoints (chat/embeddings). Caps
+# JSON buffering so a huge body can't OOM the worker; audio uploads are exempt
+# (bounded by client_max_size). Default 32 MiB.
+#max_json_body = 33554432
 
 # Allowed HTTP origins
 # This value will be sent in the Access-Control-Allow-Origin response header.
@@ -31,14 +40,44 @@ path = "/metrics"
 uri = "sqlite://db.sqlite"
 
 # Backend definitions
-# One backend corresponds to one model (retrievable through /v1/models).
+# One backend = one model, selected by the request's `model` field. The proxy
+# forwards path-preserving, so a SINGLE vLLM backend serves ALL text endpoints
+# for that model: /v1/chat/completions, /v1/completions, /v1/embeddings,
+# /v1/messages (Anthropic) and /v1/responses (OpenAI) -- vLLM speaks them all
+# natively. The whisper microservice (below) serves /v1/audio/transcriptions.
+# The backend NAME (e.g. [backends.llama3-8b]) is what clients send as "model"
+# and what appears in the billing product-string (name/device/kind).
 
-#[backends.mybackend1]
-#url = "https://mybackend1.mynamespace.cgc-waw-01.comtegra.cloud"
+# IMPORTANT -- vLLM version pin. /v1/messages and /v1/responses meter usage
+# from vLLM's native usage-event shapes, so the vLLM release matters:
+#   * < 0.13.0  -- the Anthropic `message_start` event carries NO usage, so the
+#                  proxy fails loud (500) on EVERY streaming /v1/messages request.
+#                  Do NOT deploy against these.
+#   * >= 0.13.0 -- minimum that bills /v1/messages correctly (input_tokens present).
+#   * >= 0.21.0 -- RECOMMENDED: also fixes Codex multi-turn on /v1/responses.
+#   * 0.24.0    -- version the accumulators were verified against.
+# (/v1/messages exists from 0.11.1 and /v1/responses from 0.10.0, but only
+# >= 0.13.0 reports usage in the shape this proxy bills.) Pin your vLLM image
+# tag accordingly and confirm the streaming usage shapes in a PoC before prod.
+
+# Example vLLM text backend (chat + completions + embeddings + messages +
+# responses). A client selects it with {"model": "llama3-8b", ...}.
+#[backends.llama3-8b]
+#url = "https://vllm-llama3.mynamespace.cgc-waw-01.comtegra.cloud"
 #token = "mytoken1"
-#device = "a5000"  # name of the GPU this model runs on
-#model = "llama3-8b"  # optional, override model passed to the backend, needed by vLLM
+#device = "a5000"  # GPU name; goes into the billing product-string (llama3-8b/a5000/prompt|completion)
+#model = "meta-llama/Meta-Llama-3-8B-Instruct"  # optional, the real model id vLLM expects (overrides the client's "model")
 #max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
+#timeout = 300  # optional; RAISE for reasoning / extended-thinking models that can pause >timeout_read (60s) between tokens mid-stream, else the stream 504s and that turn is unbilled
+
+# Example transcription backend (whisper microservice, /v1/audio/transcriptions).
+# Transcription can take minutes, so give it a long per-backend timeout to
+# override the global timeout_read. Client selects it with {"model": "whisper-1"}.
+#[backends.whisper-1]
+#url = "https://whisper.mynamespace.cgc-waw-01.comtegra.cloud"
+#token = "APP_TOKEN"  # the microservice's APP_TOKEN (bearer)
+#device = "a5000"  # billed as whisper-1/a5000/transcription (per second of audio)
+#timeout = 1800  # per-backend response (sock_read) timeout in seconds; audio is silent for minutes
 
 # Add more backends here

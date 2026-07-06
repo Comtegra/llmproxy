@@ -11,7 +11,7 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import audio, chat, config, embeddings, metrics
+from . import audio, chat, config, embeddings, messages, metrics, responses
 from .db import get_db
 
 
@@ -78,6 +78,34 @@ async def close_db(req, handler):
     return res
 
 
+JSON_BODY_LIMIT = 32 * 1024 * 1024  # default cap for non-upload endpoints
+
+
+@aiohttp.web.middleware
+async def limit_request_body(req, handler):
+    # client_max_size must be large enough for audio uploads, but that would let
+    # a client buffer gigabytes of JSON on the text endpoints and OOM the
+    # single-worker proxy. For non-audio routes: bound the bytes ACTUALLY read
+    # (req._client_max_size is enforced during the read, so it also covers
+    # chunked bodies with no Content-Length; aiohttp has no public per-route
+    # limit), and reject early when the client declares an oversized body.
+    if req.path != "/v1/audio/transcriptions":
+        # Only the audio route consumes multipart. On the JSON text endpoints a
+        # multipart body would be parsed by aiohttp's post(): each non-file
+        # field is read WHOLE into memory before _client_max_size is checked, so
+        # it bypasses the byte-bounded read below and lets an authenticated
+        # client OOM the single worker. Reject it here, before any body is read.
+        if req.content_type == "multipart/form-data":
+            raise aiohttp.web.HTTPUnsupportedMediaType(
+                text="multipart/form-data is not supported on this endpoint")
+        limit = req.app["config"].get("max_json_body", JSON_BODY_LIMIT)
+        req._client_max_size = limit
+        if req.content_length is not None and req.content_length > limit:
+            raise aiohttp.web.HTTPRequestEntityTooLarge(
+                limit, req.content_length)
+    return await handler(req)
+
+
 def reload_config(app):
     try:
         cfg = config.load(app["config"]["_path"])
@@ -94,13 +122,19 @@ def reload_config(app):
 async def create_app(cfg):
     config.validate(cfg)
 
+    # client_max_size bounds the request body the proxy accepts. aiohttp's
+    # default (1 MiB) would reject audio uploads with 413, so it is configurable
+    # and defaults high enough for transcription (matches the whisper
+    # microservice's 2 GiB limit).
     app = aiohttp.web.Application(
+        client_max_size=cfg.get("client_max_size", 2 * 1024 ** 3),
         middlewares=[
             metrics.metrics_middleware,
             assign_request_id,
             add_request_id_header,
             add_cors_headers,
             close_db,
+            limit_request_body,
         ])
 
     routes = [
@@ -109,6 +143,8 @@ async def create_app(cfg):
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+        aiohttp.web.post("/v1/messages", messages.messages),
+        aiohttp.web.post("/v1/responses", responses.responses),
     ]
 
     # Prometheus metrics endpoint.  The path is configurable; defaults
@@ -182,4 +218,9 @@ def main():
         ssl_context=ssl_ctx,
         access_log_format="%a \"%r\" %s %Tfs",
         loop=loop,
+        # Billing-critical: on client disconnect the handler MUST run to
+        # completion so the backend stream is drained and usage is billed.
+        # This is aiohttp's default, pinned explicitly because it is a silent
+        # revenue dependency (and aiohttp's own test harness forces it True).
+        handler_cancellation=False,
     )
