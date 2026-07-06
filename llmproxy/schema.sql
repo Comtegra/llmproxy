@@ -1,4 +1,4 @@
-CREATE TABLE event_oneoff (
+CREATE TABLE IF NOT EXISTS event_oneoff (
 	id INTEGER PRIMARY KEY,
 	created TEXT,
 	api_key TEXT,
@@ -7,7 +7,7 @@ CREATE TABLE event_oneoff (
 	rid TEXT
 );
 
-CREATE TABLE api_key (
+CREATE TABLE IF NOT EXISTS api_key (
 	id TEXT PRIMARY KEY,
 	secret BLOB,
 	type TEXT,

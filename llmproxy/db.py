@@ -178,6 +178,14 @@ class SqliteDatabase:
         self.db = await aiosqlite.connect(path)
         logger.debug("Connected to database")
 
+        # user_version is the schema-initialization marker (0 = uninitialized).
+        # schema.sql is idempotent (CREATE TABLE IF NOT EXISTS), so applying it
+        # to a version-0 database that already has the tables — e.g. one made
+        # with `sqlite3 db.sqlite < schema.sql`, which does not stamp
+        # user_version — is safe and simply heals the marker to 1. NOTE: this is
+        # a single-version init, not a migration ladder; a future schema v2 needs
+        # real migrations here, and a divergent v0 table would be accepted as-is
+        # (surfacing only at query time) rather than failing loudly at startup.
         cur = await self.db.execute("PRAGMA user_version")
         ver, = await cur.fetchone()
         if ver == 0:
