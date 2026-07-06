@@ -1,0 +1,21 @@
+# Example Prometheus scrape configuration for llmproxy.
+#
+# Add this to your prometheus.yml under `scrape_configs`:
+#
+#   scrape_configs:
+#     - job_name: "llmproxy"
+#       scheme: http                # use https if TLS is enabled
+#       metrics_path: /metrics      # default; override via config.toml [metrics] path
+#       static_configs:
+#         - targets: ["llm-billing-proxy:8080"]
+#           # If running multiple replicas, list them all:
+#           # targets: ["llmproxy-0:8080", "llmproxy-1:8080"]
+
+scrape_configs:
+  - job_name: "llmproxy"
+    scheme: http
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["llm-billing-proxy:8080"]
