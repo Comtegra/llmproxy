@@ -18,9 +18,29 @@ timeout_read = 60  # response timeout (global default sock_read; override per-ba
 # (bounded by client_max_size). Default 32 MiB.
 #max_json_body = 33554432
 
+# Seconds to cache a successful API-key lookup in memory. Without it every
+# request -- including one that is about to be rejected -- costs a database
+# round trip. Default 5; set 0 to disable and query the database every time.
+#
+# TRADE-OFF: this bounds how long a REVOKED key keeps working (up to this many
+# seconds). Key EXPIRY is NOT affected -- the expiry timestamp is re-checked on
+# every request, so an expired key is rejected immediately either way. Sending
+# SIGHUP flushes the cache, making a revocation take effect at once.
+#auth_cache_ttl = 5
+
 # Allowed HTTP origins
 # This value will be sent in the Access-Control-Allow-Origin response header.
 http_origin = "*"
+
+# Rate limiting (Phase 1: rpm + concurrency, in-memory).
+#
+# Global defaults — applied when a backend has no per-model limit. 0 = unlimited
+# (exempt); absent/NULL = fall through to the next precedence level. A global
+# limit buckets per USER (so "rpm = 60" means 60 rpm per user across all
+# models, not one hard cap shared by everyone).
+#[rate_limit]
+#rpm = 60
+#concurrency = 5
 
 [metrics]
 
@@ -70,6 +90,13 @@ uri = "sqlite://db.sqlite"
 #max_model_len = 131072  # optional, real deployment context limit (prompt + completion tokens)
 #verify_ssl = true  # optional, set to false to skip certificate verification
 #timeout = 300  # optional; RAISE for reasoning / extended-thinking models that can pause >timeout_read (60s) between tokens mid-stream, else the stream 504s and that turn is unbilled
+
+# Optional: per-model overrides for THIS backend. Precedence: per-model then
+# global. A per-model limit buckets per (USER, MODEL) — independent of other
+# models. 0 = this model is exempt from that dimension.
+#[backends.llama3-8b.rate_limit]
+#rpm = 30
+#concurrency = 3
 
 # Example transcription backend (whisper microservice, /v1/audio/transcriptions).
 # Transcription can take minutes, so give it a long per-backend timeout to

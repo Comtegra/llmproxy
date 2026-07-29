@@ -44,7 +44,7 @@ async def chat(f_req):
 
     user = await auth.require_auth(f_req)
 
-    async with proxy.request(f_req, force_include_usage) as (
+    async with proxy.request(f_req, force_include_usage, user=user) as (
             b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 

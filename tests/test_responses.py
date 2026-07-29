@@ -153,7 +153,7 @@ class TestResponsesRoute(LLMProxyAppTestCase):
             self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn("response.completed", text)  # backend stream forwarded
-        self.assertListEqual(await self.get_events(), [
+        self.assertListEqual(await self.get_events(expect=2), [
             {"product": "mymodel/none/prompt", "quantity": 7},
             {"product": "mymodel/none/completion", "quantity": 9},
         ])
@@ -191,7 +191,7 @@ class TestResponsesRoute(LLMProxyAppTestCase):
             headers={"Authorization": "Bearer mytoken"}, json=body)
         async with req as res:
             self.assertEqual(res.status, 200)
-        self.assertListEqual(await self.get_events(), [
+        self.assertListEqual(await self.get_events(expect=2), [
             {"product": "mymodel/none/prompt", "quantity": 7},
             {"product": "mymodel/none/completion", "quantity": 9},
         ])

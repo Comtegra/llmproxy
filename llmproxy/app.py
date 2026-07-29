@@ -11,8 +11,8 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import audio, chat, config, embeddings, messages, metrics, responses
-from .db import get_db
+from . import audio, auth, chat, config, embeddings, messages, metrics, ratelimit, responses
+from .db import get_db, shutdown_all
 
 
 async def check_db(app):
@@ -113,9 +113,21 @@ def reload_config(app):
         app.logger.error("Failed reloading config: %s", e)
         return
 
-    # Only backends are reloaded
+    # Only backends and the auth cache settings are reloaded
     app["config"]["backends"] = cfg.get("backends", {})
-    app.logger.info("Config reloaded. Configured backends: %s",
+    app["config"]["rate_limit"] = cfg.get("rate_limit", {})
+    app["config"]["auth_cache_ttl"] = cfg.get("auth_cache_ttl",
+        auth.DEFAULT_CACHE_TTL)
+
+    # auth_cache_ttl bounds how long a REVOKED key keeps working. Flushing here
+    # makes SIGHUP the operator's instant-revocation lever, so a revocation
+    # never has to wait out the TTL or require a restart. The rate-limit windows
+    # are flushed too so new limits start from a clean slate.
+    auth.flush_cache()
+    ratelimit.flush()
+
+    app.logger.info("Config reloaded (auth cache + rate-limit windows "
+        "flushed). Configured backends: %s",
         " ".join(app["config"]["backends"]) or "none")
 
 
@@ -179,6 +191,12 @@ async def create_app(cfg):
     async def client_close(app):
         await app["client"].close()
     app.on_cleanup.append(client_close)
+
+    # The Mongo client is process-global and its per-request close() is a no-op,
+    # so shutdown is the only thing that actually tears the pool down.
+    async def db_close(app):
+        await shutdown_all()
+    app.on_cleanup.append(db_close)
 
     await check_backends(app)
 

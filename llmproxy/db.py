@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import decimal
 import hashlib
@@ -7,6 +8,29 @@ import sqlite3
 import uuid
 
 logger = logging.getLogger(__name__)
+
+# Process-global Mongo clients, keyed by URI. A Motor client owns a connection
+# pool and a topology monitor and is meant to live for the life of the process;
+# building one per request (which is what get_db + the close_db middleware used
+# to do) defeats pooling entirely and pays a TCP + TLS + auth handshake and a
+# ping before every request does any work. SQLite is deliberately NOT pooled
+# here: an aiosqlite connection is a thread that serializes every query through
+# itself, so a shared connection would serialize the whole proxy.
+_mongo_clients = {}
+_mongo_lock = asyncio.Lock()
+
+
+async def shutdown_all():
+    """Close every process-global database client.
+
+    Called from the app's on_cleanup and at the end of a ctl command, because
+    MongoDatabase.close() is a no-op (see there) and something has to actually
+    tear the pool down."""
+    async with _mongo_lock:
+        while _mongo_clients:
+            _, db = _mongo_clients.popitem()
+            db.db.close()
+            logger.debug("Closed shared Mongo client")
 
 sqlite3.register_adapter(datetime.datetime, lambda d: d.isoformat())
 sqlite3.register_adapter(decimal.Decimal, float)
@@ -76,6 +100,25 @@ class DatabaseError(Exception):
 class MongoDatabase:
     @classmethod
     async def create(cls, uri):
+        # Fast path: a client for this URI already exists. Checked before the
+        # lock so the steady state costs one dict lookup and never awaits.
+        db = _mongo_clients.get(uri)
+        if db is not None:
+            return db
+
+        async with _mongo_lock:
+            # Re-check: several requests can miss the fast path concurrently on
+            # a cold start and queue here; only the first may build a client.
+            db = _mongo_clients.get(uri)
+            if db is not None:
+                return db
+
+            db = await cls._connect(uri)
+            _mongo_clients[uri] = db
+            return db
+
+    @classmethod
+    async def _connect(cls, uri):
         import bson
         import motor.motor_asyncio
         import pymongo.errors
@@ -106,8 +149,12 @@ class MongoDatabase:
         return self
 
     async def close(self):
-        self.db.close()
-        logger.debug("Closed database connection")
+        # Deliberately a no-op. The close_db middleware calls close() after
+        # every request; the Mongo client is process-global and must survive
+        # that. Motor does its own topology monitoring and reconnection, so a
+        # long-lived client rides out a Mongo blip better than a fresh one per
+        # request would. shutdown_all() does the real teardown.
+        pass
 
     async def user_create(self, secret_hash, expires=None, comment=None):
         raise NotImplementedError("not implemented for MongoDB")

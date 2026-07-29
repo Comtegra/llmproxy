@@ -1,9 +1,12 @@
+import asyncio
 import hashlib
 import importlib
 import importlib.resources
+import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 import warnings
 
@@ -11,7 +14,7 @@ import aiohttp
 import aiohttp.test_utils
 import prometheus_client
 
-from llmproxy import config
+from llmproxy import auth, config, ratelimit
 from llmproxy.app import create_app, reload_config
 from llmproxy.db import get_db
 
@@ -22,6 +25,11 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
     async def asyncSetUp(self):
         # Don't care about type checkers
         warnings.simplefilter("ignore", category=aiohttp.web.NotAppKeyWarning)
+
+        # The auth cache is process-global and every test builds a fresh
+        # database, so it has to be dropped between cases or one test's key
+        # lookup satisfies the next test's request.
+        auth.flush_cache()
 
         self.backend = aiohttp.test_utils.TestServer(mockbackend.create_app())
         await self.backend.start_server()
@@ -79,13 +87,32 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
 
         return app
 
-    async def get_events(self):
-        db = await get_db(self.app["config"]["db"]["uri"])
-        cur = await db.db.execute("SELECT product, quantity FROM event_oneoff")
-        rows = await cur.fetchall()
-        await db.close()
+    async def get_events(self, expect=None, timeout=5.0):
+        """Read the billed events.
 
-        return rows
+        A STREAMING handler bills after ``write_eof()``, so the client can have
+        the complete response in hand while the server is still running its
+        billing tail -- reading immediately races the write. Pass ``expect=N``
+        to poll until N rows land (or the timeout elapses, so a genuine billing
+        failure still fails the assertion rather than hanging).
+
+        Non-streaming handlers bill before responding, and the "must not be
+        billed" assertions want the current state, so the default does not
+        poll."""
+        deadline = time.monotonic() + timeout
+
+        while True:
+            db = await get_db(self.app["config"]["db"]["uri"])
+            cur = await db.db.execute(
+                "SELECT product, quantity FROM event_oneoff")
+            rows = await cur.fetchall()
+            await db.close()
+
+            if expect is None or len(rows) >= expect \
+                    or time.monotonic() >= deadline:
+                return rows
+
+            await asyncio.sleep(0.01)
 
 
 class TestChat(LLMProxyAppTestCase):
@@ -232,7 +259,7 @@ class TestChat(LLMProxyAppTestCase):
             body = await res.text()
             self.assertIn("data: [DONE]", body)
 
-        self.assertListEqual(await self.get_events(), [
+        self.assertListEqual(await self.get_events(expect=2), [
             {"product": "mymodel/none/prompt", "quantity": 1},
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
@@ -283,7 +310,7 @@ class TestChat(LLMProxyAppTestCase):
             text = await res.text()
             self.assertIn("data: [DONE]", text)
 
-        self.assertListEqual(await self.get_events(), [
+        self.assertListEqual(await self.get_events(expect=2), [
             {"product": "mymodel/none/prompt", "quantity": 1},
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
@@ -744,3 +771,109 @@ class TestMetrics(LLMProxyAppTestCase):
         self.assertFalse(
             any('path="/no/such/route"' in line for line in lines),
             "raw unknown path must not get its own series")
+
+
+class TestRateLimit(LLMProxyAppTestCase):
+    """Phase 1 rpm + concurrency: global + per-model, in-memory."""
+
+    async def asyncSetUp(self):
+        # Counters are module-global; clear between cases.
+        ratelimit.flush()
+        await super().asyncSetUp()
+
+    async def get_application(self):
+        app = await super().get_application()
+        app["config"]["rate_limit"] = {"rpm": 2, "concurrency": 1}
+        return app
+
+    async def _chat(self, model="mymodel", **extra):
+        body = {"model": model,
+            "messages": [{"role": "user", "content": "hi"}], **extra}
+        return self.client.request("POST", "/v1/chat/completions",
+            headers={"Authorization": "Bearer mytoken"}, json=body)
+
+    async def test_rpm_rejects_excess_with_retry_after(self):
+        statuses = []
+        retry_after = None
+        data = None
+        for _ in range(3):
+            async with await self._chat() as res:
+                statuses.append(res.status)
+                if res.status == 429:
+                    retry_after = res.headers.get("Retry-After")
+                    data = await res.json()
+                else:
+                    await res.read()
+        self.assertEqual(statuses, [200, 200, 429])
+        self.assertIsNotNone(retry_after)
+        self.assertEqual(data["error"]["type"], "rate_limit_exceeded")
+        self.assertIn("mymodel", data["error"]["message"])
+
+    async def test_concurrency_rejects_second_no_retry_after(self):
+        body = {"model": "slowok", "_trigger_error": "slow",
+            "messages": [{"role": "user", "content": "hi"}]}
+
+        async def one():
+            async with self.client.request("POST", "/v1/chat/completions",
+                    headers={"Authorization": "Bearer mytoken"},
+                    json=body) as res:
+                return res.status, res.headers.get("Retry-After")
+
+        task_a = asyncio.ensure_future(one())
+        await asyncio.sleep(0.3)  # let A acquire the slot + open the backend
+        task_b = asyncio.ensure_future(one())
+        sa, _ = await task_a
+        sb, ra_b = await task_b
+        self.assertEqual(sa, 200)
+        self.assertEqual(sb, 429)
+        self.assertIsNone(ra_b)
+
+    async def test_per_model_limit_scoped_to_that_model(self):
+        # Per-model limit on mymodel only; nolimit (same backend, no sub-table)
+        # is unaffected.
+        self.app["config"]["rate_limit"] = {}
+        self.app["config"]["backends"]["mymodel"]["rate_limit"] = {"rpm": 1}
+        ratelimit.flush()
+
+        statuses = []
+        for _ in range(2):
+            async with await self._chat() as res:
+                statuses.append(res.status)
+                if res.status == 429:
+                    await res.json()
+                else:
+                    await res.read()
+        self.assertEqual(statuses, [200, 429])
+
+        # nolimit has no limit -> succeeds despite mymodel being capped.
+        async with await self._chat(model="nolimit") as res:
+            self.assertEqual(res.status, 200)
+            await res.read()
+
+    async def test_zero_means_unlimited(self):
+        # Global rpm=1 but per-model rpm=0 exempts mymodel.
+        self.app["config"]["rate_limit"] = {"rpm": 1}
+        self.app["config"]["backends"]["mymodel"]["rate_limit"] = {"rpm": 0}
+        ratelimit.flush()
+        for _ in range(3):
+            async with await self._chat() as res:
+                self.assertEqual(res.status, 200)
+                await res.read()
+
+    async def test_messages_429_is_anthropic_flavour(self):
+        self.app["config"]["rate_limit"] = {"rpm": 1}
+        self.app["config"]["backends"]["mymodel"]["rate_limit"] = {}
+        ratelimit.flush()
+        body = {"model": "mymodel", "max_tokens": 4,
+            "messages": [{"role": "user", "content": "hi"}]}
+
+        async with self.client.request("POST", "/v1/messages",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+            await res.read()
+        async with self.client.request("POST", "/v1/messages",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 429)
+            data = await res.json()
+        self.assertEqual(data["type"], "error")
+        self.assertEqual(data["error"]["type"], "rate_limit_error")
