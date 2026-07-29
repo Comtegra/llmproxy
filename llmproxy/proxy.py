@@ -5,7 +5,7 @@ import time
 import aiohttp
 import yarl
 
-from . import metrics
+from . import metrics, ratelimit
 
 
 CONTEXT_LENGTH_MARKERS = (
@@ -26,7 +26,7 @@ def looks_like_context_length_error(body):
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
-async def request(f_req, body_transform=None):
+async def request(f_req, body_transform=None, user=None):
     app = f_req.app
 
     if f_req.content_type == "application/json":
@@ -81,14 +81,15 @@ async def request(f_req, body_transform=None):
             connect=app["config"]["timeout_connect"],
             sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
         b_start = time.monotonic()
-        async with app["client"].post(
-                b_url, headers=b_hdrs, data=b_body, ssl=ssl,
-                timeout=timeout) as b_res:
-            metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
-                time.monotonic() - b_start)
-            metrics.BACKEND_REQUESTS_TOTAL.labels(
-                b_name, str(b_res.status)).inc()
-            yield b_res, b_name, b_cfg
+        async with ratelimit.slot(f_req, user, b_name, b_cfg):
+            async with app["client"].post(
+                    b_url, headers=b_hdrs, data=b_body, ssl=ssl,
+                    timeout=timeout) as b_res:
+                metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+                    time.monotonic() - b_start)
+                metrics.BACKEND_REQUESTS_TOTAL.labels(
+                    b_name, str(b_res.status)).inc()
+                yield b_res, b_name, b_cfg
     except aiohttp.ServerTimeoutError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)

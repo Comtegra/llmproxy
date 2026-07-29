@@ -75,7 +75,7 @@ async def messages(f_req):
 
     user = await auth.require_auth(f_req)
 
-    async with proxy.request(f_req) as (b_res, b_name, b_cfg):
+    async with proxy.request(f_req, user=user) as (b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
         await proxy.check_response(app, b_name, b_res,

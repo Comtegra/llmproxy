@@ -25,7 +25,8 @@ idempotent.
 
 See [llmproxy/config.toml](llmproxy/config.toml) for an example configuration file.
 The program will update the list of configured backends from the config file
-on SIGHUP.
+on SIGHUP. SIGHUP also flushes the authentication cache (see
+[Authentication](#authentication)).
 
 Each backend may define `max_model_len`, the real context limit of the
 deployment in tokens (prompt plus completion). This value is exposed through
@@ -283,6 +284,21 @@ When a user attempts to authenticate, the following query is performed to the
 `TOKEN-HASH` is replaced with the SHA256 hash of the bearer token.
 
 The documents are required to have an additional field: `user_id`.
+
+### Authentication cache
+
+Successful key lookups are cached in memory for `auth_cache_ttl` seconds
+(default 5, set 0 to disable) so that repeated requests — including ones the
+proxy is about to reject — do not each cost a database round trip.
+
+Key **expiry** is not affected: the expiry timestamp is re-checked on every
+request, so an expired key stops working immediately. What the cache does delay
+is **revocation** — deleting or disabling a key can take up to `auth_cache_ttl`
+seconds to take effect. Send SIGHUP to flush the cache and make a revocation
+apply at once.
+
+The `llmproxy_auth_cache_hits_total` and `llmproxy_auth_cache_misses_total`
+counters show whether the cache is doing anything.
 
 ## Completion logging
 

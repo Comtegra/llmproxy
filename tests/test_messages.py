@@ -67,7 +67,7 @@ class TestMessagesRoute(LLMProxyAppTestCase):
             self.assertEqual(res.status, 200)
             text = await res.text()
             self.assertIn("message_start", text)  # backend stream forwarded
-        self.assertListEqual(await self.get_events(), [
+        self.assertListEqual(await self.get_events(expect=2), [
             {"product": "mymodel/none/prompt", "quantity": 3},
             {"product": "mymodel/none/completion", "quantity": 5},
         ])

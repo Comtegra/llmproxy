@@ -28,6 +28,10 @@ Prometheus.  The following metric families are provided:
 
   llmproxy_audio_seconds_total{model}
       Counter — seconds of audio transcribed.
+
+  llmproxy_auth_cache_hits_total / llmproxy_auth_cache_misses_total
+      Counter — API-key lookups served from memory vs from the database.
+      A hit rate near zero means auth_cache_ttl is too short to help.
 """
 
 import time
@@ -107,6 +111,33 @@ AUDIO_SECONDS_TOTAL = prometheus_client.Counter(
     "llmproxy_audio_seconds_total",
     "Total seconds of audio transcribed.",
     labelnames=("model",),
+    registry=_REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Auth cache
+# ---------------------------------------------------------------------------
+
+AUTH_CACHE_HITS_TOTAL = prometheus_client.Counter(
+    "llmproxy_auth_cache_hits_total",
+    "API-key lookups served from the in-process auth cache.",
+    registry=_REGISTRY,
+)
+
+AUTH_CACHE_MISSES_TOTAL = prometheus_client.Counter(
+    "llmproxy_auth_cache_misses_total",
+    "API-key lookups that required a database query.",
+    registry=_REGISTRY,
+)
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+RATE_LIMIT_REJECTIONS_TOTAL = prometheus_client.Counter(
+    "llmproxy_rate_limit_rejections_total",
+    "Rate-limit rejections (429) by model and dimension.",
+    labelnames=("model", "dimension"),
     registry=_REGISTRY,
 )
 

@@ -132,7 +132,7 @@ async def responses(f_req):
     user = await auth.require_auth(f_req)
 
     try:
-        async with proxy.request(f_req, force_stateless) as (
+        async with proxy.request(f_req, force_stateless, user=user) as (
                 b_res, b_name, b_cfg):
             app.logger.debug("Backend request completed")
 

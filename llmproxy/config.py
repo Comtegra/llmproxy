@@ -8,12 +8,37 @@ class ConfigError(Exception):
     pass
 
 
+def _validate_rate_limit(rl, prefix=""):
+    """Validate a ``[rate_limit]`` / ``[backends.X.rate_limit]`` block.
+
+    Phase 1 checks ``rpm`` and ``concurrency`` only; phase 2 appends the two
+    ``*_tpd`` keys to the same loop. Each, if present, must be a non-negative
+    int (``type(v) is not int`` excludes ``bool``). 0 = unlimited, NULL/absent
+    = fall through. ``prefix`` labels backend errors.
+    """
+    for key in ("rpm", "concurrency"):
+        if key in rl:
+            value = rl[key]
+            if type(value) is not int or value < 0:
+                raise ConfigError(
+                    "%srate_limit.%s must be a non-negative integer" %
+                    (prefix, key))
+
+
 def validate(cfg):
     for key in ("client_max_size", "max_json_body"):
         if key in cfg:
             value = cfg[key]
             if type(value) is not int or value <= 0:
                 raise ConfigError("%s must be a positive integer" % key)
+
+    if "auth_cache_ttl" in cfg:
+        value = cfg["auth_cache_ttl"]
+        if type(value) is not int or value < 0:
+            raise ConfigError(
+                "auth_cache_ttl must be a non-negative integer")
+
+    _validate_rate_limit(cfg.get("rate_limit", {}), "")
 
     for name, meta in cfg.get("backends", {}).items():
         if "max_model_len" in meta:
@@ -28,6 +53,9 @@ def validate(cfg):
             if type(value) not in (int, float) or value <= 0:
                 raise ConfigError(
                     'Backend "%s" timeout must be a positive number' % name)
+
+        _validate_rate_limit(meta.get("rate_limit", {}),
+            'Backend "%s" ' % name)
 
 
 def load(path=None, create=False):

@@ -6,7 +6,7 @@ import secrets
 import sys
 
 from . import config
-from .db import DatabaseError, get_db
+from .db import DatabaseError, get_db, shutdown_all
 
 
 def isodatetime(s):
@@ -149,6 +149,16 @@ parser_user_update.add_argument("hash")
 parser_user_update.set_defaults(func=command_user_update)
 
 
+async def _run(args):
+    # A ctl command's own db.close() is a no-op on Mongo (the client is
+    # process-global), so tear it down here or the loop shuts down with a live
+    # connection pool attached.
+    try:
+        await args.func(args)
+    finally:
+        await shutdown_all()
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
-    asyncio.run(args.func(args))
+    asyncio.run(_run(args))
