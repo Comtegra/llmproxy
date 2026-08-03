@@ -215,6 +215,9 @@ def create_app():
     app.add_routes([
         aiohttp.web.get("/health", health),
         aiohttp.web.post("/v1/chat/completions", chat),
+        # The legacy route reuses the chat handler (chat-shaped body expected);
+        # the proxy forwards path-preserving, which is all provenance tests need.
+        aiohttp.web.post("/v1/completions", chat),
         aiohttp.web.post("/v1/embeddings", embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", transcriptions),
         aiohttp.web.post("/v1/messages", messages),

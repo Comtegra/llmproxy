@@ -61,6 +61,7 @@ async def add_cors_headers(req, handler):
             raise
         res = aiohttp.web.Response()
     res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    res.headers["Access-Control-Expose-Headers"] = "X-Request-ID, X-AI-Generated"
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
     return res
@@ -113,9 +114,11 @@ def reload_config(app):
         app.logger.error("Failed reloading config: %s", e)
         return
 
-    # Only backends and the auth cache settings are reloaded
+    # Only backends, rate limits, provenance and the auth cache settings are
+    # reloaded
     app["config"]["backends"] = cfg.get("backends", {})
     app["config"]["rate_limit"] = cfg.get("rate_limit", {})
+    app["config"]["provenance"] = cfg.get("provenance", {})
     app["config"]["auth_cache_ttl"] = cfg.get("auth_cache_ttl",
         auth.DEFAULT_CACHE_TTL)
 
@@ -149,6 +152,10 @@ async def create_app(cfg):
             limit_request_body,
         ])
 
+    # A new GENERATIVE endpoint must add AI Act provenance marking itself
+    # (there is no middleware for it -- see llmproxy/provenance.py):
+    # provenance.mark() on the non-streaming branch, provenance.headers() via
+    # stream_through(extra_headers=...) on streams.
     routes = [
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.post("/v1/completions", chat.chat),

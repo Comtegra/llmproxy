@@ -4,7 +4,7 @@ import math
 
 import aiohttp
 
-from . import auth, billing, metrics, proxy
+from . import auth, billing, metrics, provenance, proxy
 
 
 def force_verbose(body):
@@ -46,6 +46,10 @@ async def transcriptions(f_req):
 
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/octet-stream")}
+        # Header-only marking: a transcript's semantics come from the input
+        # audio (the Art. 50(2) no-substantial-alteration carve-out), so the
+        # verbose_json body is forwarded byte-for-byte, segment floats intact.
+        f_hdrs.update(provenance.headers(app["config"]))
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         await billing.record(f_req, user, {

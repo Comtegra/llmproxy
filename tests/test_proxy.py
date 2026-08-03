@@ -493,6 +493,25 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
             "backends": {"m": {"timeout": 1800}, "n": {"timeout": 0.5}},
         })
 
+    def test_validate_rejects_invalid_provenance(self):
+        for cfg in (
+                {"provenance": 5},
+                {"provenance": True},
+                {"provenance": {"enabled": "true"}},
+                {"provenance": {"enabled": 1}},
+                {"provenance": {"enabled": None}},
+                {"provenance": {"generator": ""}},
+                {"provenance": {"generator": "   "}},
+                {"provenance": {"generator": 5}},
+                {"provenance": {"generator": True}}):
+            with self.subTest(cfg=cfg):
+                with self.assertRaises(config.ConfigError):
+                    config.validate(cfg)
+
+    def test_validate_accepts_valid_provenance(self):
+        config.validate({"provenance": {}})
+        config.validate({"provenance": {"enabled": False, "generator": "x"}})
+
     def test_load_invalid_toml_raises_config_error(self):
         fd, path = tempfile.mkstemp(suffix=".toml")
         with os.fdopen(fd, "w") as f:
@@ -533,6 +552,26 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
             config.load = old_load
 
         self.assertEqual(app["config"]["backends"], {"old": {}})
+
+    def test_reload_config_updates_provenance(self):
+        # SIGHUP is the operational kill switch: [provenance] from the
+        # re-read file must replace the live table without a restart.
+        app = aiohttp.web.Application()
+        app["config"] = {"_path": "dummy.toml", "backends": {},
+            "provenance": {}}
+
+        old_load = config.load
+
+        def load_disabled(path):
+            return {"backends": {}, "provenance": {"enabled": False}}
+
+        config.load = load_disabled
+        try:
+            reload_config(app)
+        finally:
+            config.load = old_load
+
+        self.assertEqual(app["config"]["provenance"], {"enabled": False})
 
 
 def _parse_metrics(text):

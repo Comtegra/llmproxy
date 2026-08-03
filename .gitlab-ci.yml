@@ -7,7 +7,7 @@ test-job:
   image: alpine:3.20.3
   dependencies: []
   script:
-    - apk add py3-aiohttp py3-aiosqlite py3-yarl
+    - apk add py3-aiohttp py3-aiosqlite py3-prometheus-client py3-yarl
     - python3 -m unittest
 
 image-job:
