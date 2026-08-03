@@ -48,7 +48,11 @@ async def request(f_req, body_transform=None, user=None):
     app.logger.debug("Frontend request: request_id=%s path=%s model=%s",
         f_req["request_id"], f_req.rel_url.path, b_name)
 
-    b_url = yarl.URL(b_cfg["url"]) / str(f_req.rel_url)[1:]
+    # Forward the path only. Joining the full rel_url would percent-encode a
+    # query string into the backend path ("?beta=true" -> "%3Fbeta=true"),
+    # which the backend 404s -- Claude Code sends ?beta=true on every request.
+    # Query params carry no semantics on these endpoints, so they are dropped.
+    b_url = yarl.URL(b_cfg["url"]) / f_req.rel_url.path[1:]
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     b_body = f_body.copy()

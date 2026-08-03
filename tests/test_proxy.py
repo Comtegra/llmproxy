@@ -151,6 +151,27 @@ class TestChat(LLMProxyAppTestCase):
             {"product": "mymodel/none/completion", "quantity": 2},
         ])
 
+    async def test_post_with_query_string_succeeds(self):
+        # Claude Code sends every request as POST /v1/messages?beta=true.
+        # Joining the raw rel_url drags the query into the backend path
+        # ("?" -> %3F), which 404s; the forward must use the path alone.
+        cases = [
+            ("/v1/messages?beta=true",
+                {"model": "mymodel", "max_tokens": 4,
+                    "messages": [{"role": "user", "content": "hi"}]}),
+            ("/v1/chat/completions?foo=1",
+                {"model": "mymodel",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+        ]
+        for path, body in cases:
+            with self.subTest(path=path):
+                req = self.client.request("POST", path,
+                    headers={"Authorization": "Bearer mytoken"}, json=body)
+
+                async with req as res:
+                    self.assertEqual(res.status, 200)
+                    await res.read()
+
     async def test_unknown_token(self):
         body = {"model": "mymodel", "messages": [{"role": "user", "content": "hi"}]}
         req = self.client.request("POST", "/v1/chat/completions",
