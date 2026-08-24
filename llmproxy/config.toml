@@ -42,6 +42,17 @@ http_origin = "*"
 #rpm = 60
 #concurrency = 5
 
+# EU AI Act Art. 50(2) provenance marking. Generative responses (chat,
+# completions, messages, responses) carry an "X-AI-Generated: true" header;
+# non-streaming ones additionally get a machine-readable top-level
+# "provenance" object (SSE streams are forwarded byte-for-byte, header only).
+# Errors, /v1/models and /v1/embeddings are never marked; transcriptions get
+# the header only. Reloaded on SIGHUP -- set enabled = false as the emergency
+# kill switch if a client's strict JSON parser rejects the extra field.
+#[provenance]
+#enabled = true
+#generator = "comtegra-llmproxy"  # "generator" value in the provenance object
+
 [metrics]
 
 # Prometheus metrics endpoint.

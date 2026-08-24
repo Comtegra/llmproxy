@@ -19,7 +19,7 @@ import json
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, metrics, proxy, streaming
+from . import auth, billing, metrics, provenance, proxy, streaming
 
 
 # Terminal Responses events carrying final usage. `response.incomplete`
@@ -141,7 +141,8 @@ async def responses(f_req):
 
             if "text/event-stream" in b_res.headers.get("Content-Type", ""):
                 usage_acc = _ResponsesStreamUsage()
-                f_res = await streaming.stream_through(f_req, b_res, usage_acc)
+                f_res = await streaming.stream_through(f_req, b_res, usage_acc,
+                    extra_headers=provenance.headers(app["config"]))
                 usage = usage_acc.usage()
             else:
                 body = await b_res.content.read()
@@ -149,6 +150,9 @@ async def responses(f_req):
                 f_hdrs = {"Content-Type":
                     b_res.headers.get("Content-Type",
                         "application/octet-stream")}
+                body, p_hdrs = provenance.mark(app["config"], body, data,
+                    b_name, f_req["request_id"])
+                f_hdrs.update(p_hdrs)
                 f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
                 usage = data["usage"]
 
