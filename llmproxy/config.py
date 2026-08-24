@@ -38,6 +38,20 @@ def validate(cfg):
             raise ConfigError(
                 "auth_cache_ttl must be a non-negative integer")
 
+    if "provenance" in cfg:
+        # Must be a table: `provenance = true` would otherwise only blow up at
+        # request time inside cfg.get("provenance", {}).get(...).
+        p = cfg["provenance"]
+        if type(p) is not dict:
+            raise ConfigError("provenance must be a table")
+        if "enabled" in p and type(p["enabled"]) is not bool:
+            raise ConfigError("provenance.enabled must be a boolean")
+        if "generator" in p:
+            value = p["generator"]
+            if type(value) is not str or not value.strip():
+                raise ConfigError(
+                    "provenance.generator must be a non-empty string")
+
     _validate_rate_limit(cfg.get("rate_limit", {}), "")
 
     for name, meta in cfg.get("backends", {}).items():

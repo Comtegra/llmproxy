@@ -72,21 +72,29 @@ async def drain(read_block, write_block, on_chunk, on_disconnect=None,
                 on_disconnect(e)
 
 
-async def stream_through(f_req, b_res, on_chunk):
+async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     """Wire a chunked backend response to the client, invoking ``on_chunk`` for
     every SSE block (including during the post-disconnect drain). Returns the
     prepared client ``StreamResponse``.
 
     ``on_chunk`` is a per-format usage accumulator, so the same pump/drain logic
     serves chat, Anthropic messages and OpenAI responses.
+
+    ``extra_headers`` (e.g. the provenance marking) must be passed HERE, not
+    added by middleware: the response is prepared before the handler returns,
+    and prepared responses skip add_request_id_header/add_cors_headers -- the
+    same reason X-Request-ID and CORS are set manually below.
     """
     app = f_req.app
     headers = {"Content-Type":
         b_res.headers.get("Content-Type", "application/octet-stream")}
     headers["X-Request-ID"] = str(f_req["request_id"])
+    if extra_headers:
+        headers.update(extra_headers)
     f_res = aiohttp.web.StreamResponse(headers=headers)
 
     f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    f_res.headers["Access-Control-Expose-Headers"] = "X-Request-ID, X-AI-Generated"
     if o := app["config"].get("http_origin"):
         f_res.headers["Access-Control-Allow-Origin"] = o
 
