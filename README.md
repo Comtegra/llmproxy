@@ -34,6 +34,12 @@ deployment in tokens (prompt plus completion). This value is exposed through
 limit. It should match the backend deployment setting (for example vLLM
 `--max-model-len`), not just the public model card.
 
+A backend may also define `model`, the real model id (repo name, e.g.
+`meta-llama/Meta-Llama-3-8B-Instruct`) the backend expects in place of the
+client's `model` field. This is exposed through `/v1/models` as `model_repo` --
+(null when unset) -- so clients can inspect which actual model is behind each
+served model name.
+
 ```sh
 pkill -f -HUP 'python3? .*llmproxy'
 
