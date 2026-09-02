@@ -95,6 +95,9 @@ async def models(req):
             "created": None,
             "owned_by": None,
             "device": meta.get("device"),
+            # The real model id / repo name from the config (the upstream
+            # model card), so clients can see what we actually serve.
+            "model_repo": meta.get("model"),
         }
         if "max_model_len" in meta:
             item["max_model_len"] = meta["max_model_len"]
