@@ -127,11 +127,16 @@ class TestChat(LLMProxyAppTestCase):
         models = {m["id"]: m for m in data["data"]}
         self.assertEqual(models["mymodel"]["max_model_len"], 12345)
         self.assertNotIn("max_model_len", models["nolimit"])
+        # model_repo carries the backend's optional real model id (repo name);
+        # backends without it expose null.
+        self.assertEqual(models["nolimit"]["model_repo"], "mymodel")
+        self.assertEqual(models["slowok"]["model_repo"], "mymodel")
+        self.assertIsNone(models["mymodel"]["model_repo"])
         for model in models.values():
             self.assertLessEqual(
                 set(model),
                 {"id", "object", "created", "owned_by", "device",
-                    "max_model_len"},
+                    "model_repo", "max_model_len"},
             )
 
     async def test_simple(self):
