@@ -11,11 +11,11 @@ sit inside the billing moat (streaming.drain), so stream-body marking is
 deferred.
 
 Errors, /v1/models and /v1/embeddings are not generated content and are never
-marked; /v1/audio/transcriptions gets the header only (the transcript's
-semantics come from the input audio -- the Art. 50(2) no-substantial-alteration
-carve-out). ``[provenance] enabled = false`` is the SIGHUP-reloadable kill
-switch for an emergency rollback if a client's strict parser rejects the extra
-field.
+marked; /v1/audio/transcriptions and /v1/files/convert get the header only
+(the output's semantics come from the input file -- the Art. 50(2)
+no-substantial-alteration carve-out). ``[provenance] enabled = false`` is the
+SIGHUP-reloadable kill switch for an emergency rollback if a client's strict
+parser rejects the extra field.
 
 A future stream-body marking (v2) belongs in a WRITE-side transform inside
 streaming.drain(), between ``on_chunk`` and ``write_block`` -- never on the

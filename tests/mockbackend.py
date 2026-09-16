@@ -209,6 +209,36 @@ async def responses(req):
     })
 
 
+async def marker(req):
+    # Datalab Marker sync contract: multipart file in, JSON out. Failures are
+    # HTTP 200 with success=false (Datalab convention); the proxy must not bill.
+    post = await req.post()
+    # Proxy must strip `model` before forwarding -- Marker never sees it.
+    if "model" in post:
+        return aiohttp.web.json_response(
+            {"success": False, "error": "unexpected model field"},
+            status=200)
+
+    if post.get("_fail"):
+        return aiohttp.web.json_response(
+            {"success": False, "error": "conversion failed"},
+            status=200)
+
+    file_field = post.get("file")
+    if file_field is None:
+        return aiohttp.web.json_response(
+            {"success": False, "error": "no file provided"},
+            status=200)
+
+    return aiohttp.web.json_response({
+        "success": True,
+        "output": "# Converted\n\nhello",
+        "page_count": 1,
+        "images": {},
+        "output_format": post.get("output_format", "markdown"),
+    })
+
+
 def create_app():
     # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
     app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3)
@@ -222,5 +252,7 @@ def create_app():
         aiohttp.web.post("/v1/audio/transcriptions", transcriptions),
         aiohttp.web.post("/v1/messages", messages),
         aiohttp.web.post("/v1/responses", responses),
+        # Path-rewritten target for /v1/files/convert (not path-preserving).
+        aiohttp.web.post("/api/v1/marker", marker),
     ])
     return app

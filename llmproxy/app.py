@@ -11,8 +11,19 @@ import uuid
 import aiohttp.web
 import yarl
 
-from . import audio, auth, chat, config, embeddings, messages, metrics, ratelimit, responses
+from . import (
+    audio, auth, chat, config, embeddings, files, messages, metrics, ratelimit,
+    responses,
+)
 from .db import get_db, shutdown_all
+
+
+# Multipart upload routes: exempt from the JSON body cap and allowed to send
+# multipart/form-data (other routes reject multipart with 415 to avoid OOM).
+UPLOAD_PATHS = frozenset({
+    "/v1/audio/transcriptions",
+    "/v1/files/convert",
+})
 
 
 async def check_db(app):
@@ -26,7 +37,9 @@ async def check_backends(app):
     for name, cfg in app["config"].get("backends", {}).items():
         try:
             ssl = None if cfg.get("verify_ssl", True) else False
-            await app["client"].get(yarl.URL(cfg["url"]) / "health", ssl=ssl,
+            health_path = cfg.get("health_path", "health")
+            await app["client"].get(
+                yarl.URL(cfg["url"]) / health_path, ssl=ssl,
                 raise_for_status=True)
             logging.info("Backend %s ready", name)
         except aiohttp.ClientError as e:
@@ -90,8 +103,8 @@ async def limit_request_body(req, handler):
     # (req._client_max_size is enforced during the read, so it also covers
     # chunked bodies with no Content-Length; aiohttp has no public per-route
     # limit), and reject early when the client declares an oversized body.
-    if req.path != "/v1/audio/transcriptions":
-        # Only the audio route consumes multipart. On the JSON text endpoints a
+    if req.path not in UPLOAD_PATHS:
+        # Only upload routes consume multipart. On the JSON text endpoints a
         # multipart body would be parsed by aiohttp's post(): each non-file
         # field is read WHOLE into memory before _client_max_size is checked, so
         # it bypasses the byte-bounded read below and lets an authenticated
@@ -138,9 +151,9 @@ async def create_app(cfg):
     config.validate(cfg)
 
     # client_max_size bounds the request body the proxy accepts. aiohttp's
-    # default (1 MiB) would reject audio uploads with 413, so it is configurable
-    # and defaults high enough for transcription (matches the whisper
-    # microservice's 2 GiB limit).
+    # default (1 MiB) would reject audio/PDF uploads with 413, so it is
+    # configurable and defaults high enough for transcription and file
+    # conversion (matches the whisper microservice's 2 GiB limit).
     app = aiohttp.web.Application(
         client_max_size=cfg.get("client_max_size", 2 * 1024 ** 3),
         middlewares=[
@@ -162,6 +175,7 @@ async def create_app(cfg):
         aiohttp.web.get("/v1/models", chat.models),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+        aiohttp.web.post("/v1/files/convert", files.convert),
         aiohttp.web.post("/v1/messages", messages.messages),
         aiohttp.web.post("/v1/responses", responses.responses),
     ]

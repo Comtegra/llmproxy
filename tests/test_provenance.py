@@ -224,6 +224,21 @@ class TestProvenanceRoutes(LLMProxyAppTestCase):
         self.assertNotIn("provenance", data)
         self.assertEqual(data["duration"], 12.5)
 
+    async def test_file_convert_header_only(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers=AUTH, data=form)
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            self.assertEqual(res.headers["X-AI-Generated"], "true")
+            data = await res.json()
+        # Marker's body is forwarded as-is; mock has no provenance field.
+        self.assertNotIn("provenance", data)
+        self.assertEqual(data["output"], "# Converted\n\nhello")
+
     async def test_kill_switch_disables_marking(self):
         self.app["config"]["provenance"] = {"enabled": False}
 
