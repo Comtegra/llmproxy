@@ -26,7 +26,13 @@ def looks_like_context_length_error(body):
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
-async def request(f_req, body_transform=None, user=None):
+async def request(f_req, body_transform=None, user=None, path=None):
+    """Forward a client request to the backend selected by ``model``.
+
+    ``path`` overrides the path appended to the backend URL. By default the
+    frontend path is preserved (vLLM / whisper). File conversion rewrites to
+    the marker microservice's ``/api/v1/marker`` instead.
+    """
     app = f_req.app
 
     if f_req.content_type == "application/json":
@@ -52,7 +58,9 @@ async def request(f_req, body_transform=None, user=None):
     # query string into the backend path ("?beta=true" -> "%3Fbeta=true"),
     # which the backend 404s -- Claude Code sends ?beta=true on every request.
     # Query params carry no semantics on these endpoints, so they are dropped.
-    b_url = yarl.URL(b_cfg["url"]) / f_req.rel_url.path[1:]
+    # ``path`` lets a handler rewrite (e.g. /v1/files/convert -> api/v1/marker).
+    b_path = path if path is not None else f_req.rel_url.path[1:]
+    b_url = yarl.URL(b_cfg["url"]) / b_path
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
 
     b_body = f_body.copy()
@@ -66,11 +74,17 @@ async def request(f_req, body_transform=None, user=None):
         b_body = json.dumps(b_body)
         b_hdrs["Content-Type"] = "application/json"
     elif f_req.content_type == "multipart/form-data":
-        # Manually add fields to FormData as aiohttp can't serialize FileField
+        # Manually add fields to FormData as aiohttp can't serialize FileField.
+        # FileField.file may be a tempfile._TemporaryFileWrapper, which newer
+        # aiohttp payload registries reject -- unwrap to the real file object
+        # (or fall back to reading bytes) so audio/PDF uploads forward cleanly.
         d = aiohttp.FormData()
         for key, value in b_body.items():
             if isinstance(value, aiohttp.web.FileField):
-                d.add_field(key, value.file, content_type=value.content_type,
+                raw = value.file
+                if hasattr(raw, "file"):
+                    raw = raw.file
+                d.add_field(key, raw, content_type=value.content_type,
                     filename=value.filename)
             else:
                 d.add_field(key, value)
