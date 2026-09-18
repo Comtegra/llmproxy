@@ -30,7 +30,7 @@ Prometheus.  The following metric families are provided:
       Counter — seconds of audio transcribed.
 
   llmproxy_file_conversions_total{model}
-      Counter — successful PDF-to-Markdown conversions.
+      Counter — PDF pages converted to Markdown.
 
   llmproxy_auth_cache_hits_total / llmproxy_auth_cache_misses_total
       Counter — API-key lookups served from memory vs from the database.
@@ -119,7 +119,7 @@ AUDIO_SECONDS_TOTAL = prometheus_client.Counter(
 
 FILE_CONVERSIONS_TOTAL = prometheus_client.Counter(
     "llmproxy_file_conversions_total",
-    "Total successful PDF-to-Markdown conversions.",
+    "Total PDF pages converted to Markdown.",
     labelnames=("model",),
     registry=_REGISTRY,
 )

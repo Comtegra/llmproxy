@@ -79,7 +79,7 @@ path = "/metrics"     # path under which metrics are served
 | `llmproxy_backend_errors_total` | Counter | `model`, `error_type` | Backend errors (timeout, connection, client_error) |
 | `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
 | `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
-| `llmproxy_file_conversions_total` | Counter | `model` | Successful PDF→Markdown conversions |
+| `llmproxy_file_conversions_total` | Counter | `model` | PDF pages converted to Markdown |
 
 ### Quick start (Kubernetes + Prometheus Operator)
 
@@ -325,7 +325,7 @@ These documents have the following fields:
     * `MODEL` is the name of the backend
     * `DEVICE` is the name of the GPU where the model runs
     * `TYPE` is `prompt`, `completion`, `embedding`, `transcription`, or
-      `conversion`
+      `conversion` (PDF pages for `/v1/files/convert`)
 * `quantity` -- token count
 * `request_id` -- request ID to correlate prompt/completion counts
 

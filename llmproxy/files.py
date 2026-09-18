@@ -25,6 +25,14 @@ def prepare_marker_body(body):
         body["output_format"] = "markdown"
 
 
+def page_count_from_response(data):
+    """Return a billable page count, or None if missing/unusable."""
+    pages = data.get("page_count")
+    if isinstance(pages, bool) or not isinstance(pages, int) or pages <= 0:
+        return None
+    return pages
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 async def convert(f_req):
@@ -64,6 +72,16 @@ async def convert(f_req):
             exc.body = body
             raise exc
 
+        # Page count is the only billable quantity. Same fail-loud policy as
+        # transcription duration: never emit a zero/corrupt billing row.
+        pages = page_count_from_response(data)
+        if pages is None:
+            app.logger.error(
+                "File-convert backend %s returned no billable page_count: "
+                "request_id=%s", b_name, f_req["request_id"])
+            raise aiohttp.web.HTTPBadGateway(
+                text="File conversion backend returned no page_count")
+
         f_hdrs = {"Content-Type":
             b_res.headers.get("Content-Type", "application/json")}
         # Header-only marking: forward Marker's JSON (may already include its
@@ -77,10 +95,10 @@ async def convert(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         await billing.record(f_req, user, {
-            "%s/%s/conversion" % (b_name, b_cfg["device"]): 1,
+            "%s/%s/conversion" % (b_name, b_cfg["device"]): pages,
         })
 
-        app.logger.info("Client used: 1 conversion of %s", b_name)
-        metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc()
+        app.logger.info("Client used: %d page(s) of %s", pages, b_name)
+        metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc(pages)
 
         return f_res

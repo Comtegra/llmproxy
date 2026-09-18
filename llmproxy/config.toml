@@ -125,7 +125,7 @@ uri = "sqlite://db.sqlite"
 # Example PDF->Markdown backend (marker microservice, /v1/files/convert).
 # Conversion can take minutes; use a long per-backend timeout. Client selects
 # it with form field model=pdf-to-markdown. Billed as one-off
-# pdf-to-markdown/<device>/conversion (quantity 1 per successful convert).
+# pdf-to-markdown/<device>/conversion (quantity = page_count from Marker).
 # Put the microservice APP_TOKEN in token= below (do not commit secrets).
 #[backends.pdf-to-markdown]
 #url = "https://marker-microservice.apps.cgc-krk-01.comtegra.cloud"
