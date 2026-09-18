@@ -230,14 +230,18 @@ async def marker(req):
             {"success": False, "error": "no file provided"},
             status=200)
 
-    return aiohttp.web.json_response({
+    payload = {
         "success": True,
         "output": "# Converted\n\nhello",
-        "page_count": 1,
         "images": {},
         "output_format": post.get("output_format", "markdown"),
-    })
-
+    }
+    if not post.get("_omit_page_count"):
+        try:
+            payload["page_count"] = int(post.get("_pages", "1"))
+        except (TypeError, ValueError):
+            payload["page_count"] = 1
+    return aiohttp.web.json_response(payload)
 
 def create_app():
     # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
