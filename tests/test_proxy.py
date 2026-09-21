@@ -322,6 +322,73 @@ class TestChat(LLMProxyAppTestCase):
             {"product": "mymodel/none/transcription", "quantity": 12.5},
         ])
 
+    async def test_file_convert_billing(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("_pages", "5")
+        form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 200)
+            self.assertIn("X-Request-ID", res.headers)
+            data = await res.json()
+
+        self.assertTrue(data["success"])
+        self.assertEqual(data["output"], "# Converted\n\nhello")
+        self.assertEqual(data["page_count"], 5)
+        # Billed per page; quantity = page_count).
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymodel/none/conversion", "quantity": 5},
+        ])
+
+    async def test_file_convert_missing_page_count_fails_loud(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("_omit_page_count", "1")
+        form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 502)
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_file_convert_failure_not_billed(self):
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("_fail", "1")
+        form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 422)
+            data = await res.json()
+
+        self.assertFalse(data.get("success", True))
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_file_convert_requires_file(self):
+        # Plain string-only FormData is urlencoded (415); include a file field
+        # under the wrong name so we still hit multipart + the handler guard.
+        form = aiohttp.FormData()
+        form.add_field("model", "mymodel")
+        form.add_field("not_file", b"%PDF-1.4", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers={"Authorization": "Bearer mytoken"}, data=form)
+
+        async with req as res:
+            self.assertEqual(res.status, 422)
+
+        self.assertListEqual(await self.get_events(), [])
+
     async def test_streaming_usage_in_trailing_chunk(self):
         # Realistic vLLM: usage arrives in a separate trailing chunk, not the
         # content chunk. The proxy must keep the last non-[DONE] chunk.
