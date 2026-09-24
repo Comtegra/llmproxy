@@ -30,6 +30,27 @@ the `[provenance]` settings (see
 config file on SIGHUP. SIGHUP also flushes the authentication cache (see
 [Authentication](#authentication)).
 
+Each backend must define `type`, which decides the endpoints it is served on:
+
+| `type` | Endpoints |
+|--------|-----------|
+| `chat` | `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/responses` |
+| `embedding` | `/v1/embeddings` |
+| `transcription` | `/v1/audio/transcriptions` |
+| `conversion` | `/v1/files/convert` |
+
+A request naming a model on an endpoint of another type (e.g. chat completions
+with an embedding model) is rejected with `404` and `code: model_not_supported`
+before it reaches the backend: it is not billed and does not count against
+rate limits. On `/v1/messages` the error uses the Anthropic shape
+(`not_found_error`). The type is exposed through `/v1/models`.
+
+**Upgrading:** the proxy refuses to start while any backend lacks a valid
+`type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which
+loads the same config, refuses to run as well). Versions without
+this check ignore the key, so add `type` to every backend in the deployed
+config *before* rolling out the new version.
+
 Each backend may define `max_model_len`, the real context limit of the
 deployment in tokens (prompt plus completion). This value is exposed through
 `/v1/models` so clients can avoid sending requests that exceed the backend

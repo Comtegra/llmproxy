@@ -44,34 +44,56 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
     async def get_application(self):
         self.db_fd, self.db_path = tempfile.mkstemp()
 
+        url = "http://%s:%d" % (self.backend.host, self.backend.port)
         app = await create_app({
             "timeout_connect": 1,
             "timeout_read": 1,
             "max_json_body": 1024 * 1024,
             "db": {"uri": "sqlite://%s" % self.db_path},
+            # All backends point at the one mock server; each non-chat type
+            # gets its own alias so the endpoint/type check lets it through.
             "backends": {
                 "mymodel": {
-                    "url": "http://%s:%d" % (
-                        self.backend.host, self.backend.port),
+                    "url": url,
                     "token": "mybackendtoken",
                     "device": "none",
+                    "type": "chat",
                     "max_model_len": 12345,
                 },
                 "nolimit": {
-                    "url": "http://%s:%d" % (
-                        self.backend.host, self.backend.port),
+                    "url": url,
                     "token": "secret-backend-token",
                     "device": "none",
+                    "type": "chat",
                     "model": "mymodel",
                     "verify_ssl": False,
                 },
                 "slowok": {
-                    "url": "http://%s:%d" % (
-                        self.backend.host, self.backend.port),
+                    "url": url,
                     "token": "mybackendtoken",
                     "device": "none",
+                    "type": "chat",
                     "model": "mymodel",
                     "timeout": 5,
+                },
+                "myembedding": {
+                    "url": url,
+                    "token": "mybackendtoken",
+                    "device": "none",
+                    "type": "embedding",
+                    "model": "mymodel",
+                },
+                "mywhisper": {
+                    "url": url,
+                    "token": "mybackendtoken",
+                    "device": "none",
+                    "type": "transcription",
+                },
+                "mymarker": {
+                    "url": url,
+                    "token": "mybackendtoken",
+                    "device": "none",
+                    "type": "conversion",
                 },
             },
         })
@@ -132,10 +154,15 @@ class TestChat(LLMProxyAppTestCase):
         self.assertEqual(models["nolimit"]["model_repo"], "mymodel")
         self.assertEqual(models["slowok"]["model_repo"], "mymodel")
         self.assertIsNone(models["mymodel"]["model_repo"])
+        # type tells clients which endpoints each model is served on.
+        self.assertEqual({name: m["type"] for name, m in models.items()}, {
+            "mymodel": "chat", "nolimit": "chat", "slowok": "chat",
+            "myembedding": "embedding", "mywhisper": "transcription",
+            "mymarker": "conversion"})
         for model in models.values():
             self.assertLessEqual(
                 set(model),
-                {"id", "object", "created", "owned_by", "device",
+                {"id", "object", "created", "owned_by", "type", "device",
                     "model_repo", "max_model_len"},
             )
 
@@ -291,7 +318,7 @@ class TestChat(LLMProxyAppTestCase):
         ])
 
     async def test_embeddings_billing(self):
-        body = {"model": "mymodel", "input": "hello"}
+        body = {"model": "myembedding", "input": "hello"}
         req = self.client.request("POST", "/v1/embeddings",
             headers={"Authorization": "Bearer mytoken"}, json=body)
 
@@ -301,12 +328,12 @@ class TestChat(LLMProxyAppTestCase):
 
         self.assertEqual(data["usage"]["prompt_tokens"], 7)
         self.assertListEqual(await self.get_events(), [
-            {"product": "mymodel/none/embedding", "quantity": 7},
+            {"product": "myembedding/none/embedding", "quantity": 7},
         ])
 
     async def test_audio_transcription_billing(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mywhisper")
         form.add_field("file", b"RIFFfake-audio", filename="a.wav",
             content_type="audio/wav")
         req = self.client.request("POST", "/v1/audio/transcriptions",
@@ -319,12 +346,12 @@ class TestChat(LLMProxyAppTestCase):
         # Billed per second of audio; fractional durations must survive.
         self.assertEqual(data["duration"], 12.5)
         self.assertListEqual(await self.get_events(), [
-            {"product": "mymodel/none/transcription", "quantity": 12.5},
+            {"product": "mywhisper/none/transcription", "quantity": 12.5},
         ])
 
     async def test_file_convert_billing(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mymarker")
         form.add_field("_pages", "5")
         form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
             content_type="application/pdf")
@@ -341,12 +368,12 @@ class TestChat(LLMProxyAppTestCase):
         self.assertEqual(data["page_count"], 5)
         # Billed per page; quantity = page_count).
         self.assertListEqual(await self.get_events(), [
-            {"product": "mymodel/none/conversion", "quantity": 5},
+            {"product": "mymarker/none/conversion", "quantity": 5},
         ])
 
     async def test_file_convert_missing_page_count_fails_loud(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mymarker")
         form.add_field("_omit_page_count", "1")
         form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
             content_type="application/pdf")
@@ -360,7 +387,7 @@ class TestChat(LLMProxyAppTestCase):
 
     async def test_file_convert_failure_not_billed(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mymarker")
         form.add_field("_fail", "1")
         form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
             content_type="application/pdf")
@@ -378,7 +405,7 @@ class TestChat(LLMProxyAppTestCase):
         # Plain string-only FormData is urlencoded (415); include a file field
         # under the wrong name so we still hit multipart + the handler guard.
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mymarker")
         form.add_field("not_file", b"%PDF-1.4", filename="doc.pdf",
             content_type="application/pdf")
         req = self.client.request("POST", "/v1/files/convert",
@@ -429,7 +456,7 @@ class TestChat(LLMProxyAppTestCase):
         # is 1 MiB, and the app raises it so audio works.
         big = b"\x00" * (2 * 1024 * 1024)
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mywhisper")
         form.add_field("file", big, filename="a.wav",
             content_type="audio/wav")
         req = self.client.request("POST", "/v1/audio/transcriptions",
@@ -439,7 +466,7 @@ class TestChat(LLMProxyAppTestCase):
             self.assertEqual(res.status, 200)
 
         self.assertListEqual(await self.get_events(), [
-            {"product": "mymodel/none/transcription", "quantity": 12.5},
+            {"product": "mywhisper/none/transcription", "quantity": 12.5},
         ])
 
     async def test_unbillable_duration_fails_loud(self):
@@ -451,7 +478,7 @@ class TestChat(LLMProxyAppTestCase):
         for field, value in cases:
             with self.subTest(case=value):
                 form = aiohttp.FormData()
-                form.add_field("model", "mymodel")
+                form.add_field("model", "mywhisper")
                 form.add_field(field, value)
                 form.add_field("file", b"RIFFfake", filename="a.wav",
                     content_type="audio/wav")
@@ -555,16 +582,134 @@ class TestChat(LLMProxyAppTestCase):
         ])
 
 
+class TestModelRouting(LLMProxyAppTestCase):
+    """A backend's ``type`` decides which endpoints may reach it."""
+
+    AUTH = {"Authorization": "Bearer mytoken"}
+
+    # One backend alias per type (see get_application).
+    MODEL_BY_TYPE = {"chat": "mymodel", "embedding": "myembedding",
+        "transcription": "mywhisper", "conversion": "mymarker"}
+
+    # Every model-routed endpoint and the backend type it serves.
+    ENDPOINT_TYPES = {
+        "/v1/chat/completions": "chat",
+        "/v1/completions": "chat",
+        "/v1/messages": "chat",
+        "/v1/responses": "chat",
+        "/v1/embeddings": "embedding",
+        "/v1/audio/transcriptions": "transcription",
+        "/v1/files/convert": "conversion",
+    }
+
+    def _post(self, path, model):
+        if path in ("/v1/audio/transcriptions", "/v1/files/convert"):
+            form = aiohttp.FormData()
+            form.add_field("model", model)
+            form.add_field("file", b"payload", filename="f.bin",
+                content_type="application/octet-stream")
+            return self.client.request("POST", path, headers=self.AUTH,
+                data=form)
+        body = {"model": model, "max_tokens": 4, "input": "hi",
+            "messages": [{"role": "user", "content": "hi"}]}
+        return self.client.request("POST", path, headers=self.AUTH, json=body)
+
+    async def test_model_of_another_type_rejected_before_backend(self):
+        # Every endpoint x every other type. E.g. chat completions on an
+        # embedding model used to be forwarded, answered with generated text
+        # and billed as prompt/completion tokens the model has no price for.
+        backend_paths = self.backend.app["paths"]
+        for path, served in self.ENDPOINT_TYPES.items():
+            for model_type, model in self.MODEL_BY_TYPE.items():
+                if model_type == served:
+                    continue
+                with self.subTest(path=path, model=model):
+                    seen = len(backend_paths)
+                    async with self._post(path, model) as res:
+                        self.assertEqual(res.status, 404)
+                        self.assertIn("X-Request-ID", res.headers)
+                        data = await res.json()
+
+                    if path == "/v1/messages":
+                        self.assertEqual(data["type"], "error")
+                        self.assertEqual(data["error"]["type"],
+                            "not_found_error")
+                    else:
+                        self.assertEqual(data["error"]["type"],
+                            "invalid_request_error")
+                        self.assertEqual(data["error"]["code"],
+                            "model_not_supported")
+                        self.assertEqual(data["error"]["param"], "model")
+                    self.assertIn(model, data["error"]["message"])
+                    self.assertIn(model_type, data["error"]["message"])
+                    self.assertIn(path, data["error"]["message"])
+
+                    self.assertEqual(backend_paths[seen:], [])
+                    self.assertListEqual(await self.get_events(), [])
+
+    async def test_type_checked_before_endpoint_body_validation(self):
+        # The client is told the model is wrong for this endpoint, not what
+        # the endpoint's own body validation would say about the payload.
+        form = aiohttp.FormData()
+        form.add_field("model", "mywhisper")
+        form.add_field("not_file", b"%PDF-1.4", filename="doc.pdf",
+            content_type="application/pdf")
+        cases = [
+            # else 400 stateful_not_supported (responses.force_stateless)
+            ("/v1/responses", {"json": {"model": "myembedding", "input": "hi",
+                "previous_response_id": "resp_1"}}),
+            # else 422 "file is required" (files.prepare_marker_body)
+            ("/v1/files/convert", {"data": form}),
+        ]
+        for path, kwargs in cases:
+            with self.subTest(path=path):
+                req = self.client.request("POST", path, headers=self.AUTH,
+                    **kwargs)
+                async with req as res:
+                    self.assertEqual(res.status, 404)
+                    data = await res.json()
+                self.assertEqual(data["error"]["code"], "model_not_supported")
+
+    async def test_rejected_model_does_not_consume_rate_limit(self):
+        # The type check runs before ratelimit.slot, so a rejected request
+        # must not use up the caller's rpm budget.
+        ratelimit.flush()
+        self.addCleanup(ratelimit.flush)
+        self.app["config"]["rate_limit"] = {"rpm": 1}
+
+        async with self._post("/v1/chat/completions", "myembedding") as res:
+            self.assertEqual(res.status, 404)
+        async with self._post("/v1/chat/completions", "mymodel") as res:
+            self.assertEqual(res.status, 200)
+
+
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
+    def test_validate_requires_known_backend_type(self):
+        # Required: a backend without a type would let any endpoint reach it
+        # (e.g. chat completions on an embedding model).
+        for meta in ({}, {"type": "completion"}, {"type": "Chat"},
+                {"type": ""}, {"type": ["chat"]}, {"type": True}):
+            with self.subTest(meta=meta):
+                with self.assertRaisesRegex(config.ConfigError,
+                        'Backend "m" type must be one of'):
+                    config.validate({"backends": {"m": meta}})
+
+    def test_validate_accepts_every_backend_type(self):
+        for backend_type in config.BACKEND_TYPES:
+            with self.subTest(type=backend_type):
+                config.validate({"backends": {"m": {"type": backend_type}}})
+
     def test_validate_accepts_positive_integer_max_model_len(self):
-        config.validate({"backends": {"mymodel": {"max_model_len": 131072}}})
+        config.validate({"backends": {"mymodel": {"type": "chat",
+            "max_model_len": 131072}}})
 
     def test_validate_rejects_invalid_max_model_len(self):
         for value in (0, -1, "131072", True):
             with self.subTest(value=value):
                 with self.assertRaises(config.ConfigError):
                     config.validate({
-                        "backends": {"mymodel": {"max_model_len": value}},
+                        "backends": {"mymodel": {"type": "chat",
+                            "max_model_len": value}},
                     })
 
     def test_validate_rejects_invalid_body_limits(self):
@@ -578,12 +723,14 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
         for value in (0, -1, "5", True):
             with self.subTest(value=value):
                 with self.assertRaises(config.ConfigError):
-                    config.validate({"backends": {"m": {"timeout": value}}})
+                    config.validate({"backends": {"m": {"type": "chat",
+                        "timeout": value}}})
 
     def test_validate_accepts_valid_timeout_and_client_max_size(self):
         config.validate({
             "client_max_size": 2147483648,
-            "backends": {"m": {"timeout": 1800}, "n": {"timeout": 0.5}},
+            "backends": {"m": {"type": "chat", "timeout": 1800},
+                "n": {"type": "chat", "timeout": 0.5}},
         })
 
     def test_validate_rejects_invalid_provenance(self):
@@ -624,7 +771,8 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
                     "timeout_connect": 1,
                     "timeout_read": 1,
                     "db": {"uri": "sqlite://%s" % path},
-                    "backends": {"mymodel": {"max_model_len": 0}},
+                    "backends": {"mymodel": {"type": "chat",
+                        "max_model_len": 0}},
                 })
         finally:
             os.unlink(path)

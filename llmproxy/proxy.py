@@ -5,7 +5,7 @@ import time
 import aiohttp
 import yarl
 
-from . import metrics, ratelimit
+from . import errors, metrics, ratelimit
 
 
 CONTEXT_LENGTH_MARKERS = (
@@ -23,11 +23,24 @@ def looks_like_context_length_error(body):
     return any(marker in text for marker in CONTEXT_LENGTH_MARKERS)
 
 
+def _model_error(f_req, message, code):
+    # 404 like OpenAI for a model that exists but is not served on this
+    # endpoint ("This is not a chat model...").
+    return errors.json_error(f_req, aiohttp.web.HTTPNotFound, message,
+        openai_type="invalid_request_error", anthropic_type="not_found_error",
+        code=code, param="model")
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
-async def request(f_req, body_transform=None, user=None, path=None):
+async def request(f_req, body_transform=None, user=None, path=None, *,
+        backend_type):
     """Forward a client request to the backend selected by ``model``.
+
+    ``backend_type`` is the backend type (config.BACKEND_TYPES) the calling
+    endpoint serves; a model of any other type is rejected with 404 before
+    rate limiting, the backend call and billing.
 
     ``path`` overrides the path appended to the backend URL. By default the
     frontend path is preserved (vLLM / whisper). File conversion rewrites to
@@ -50,6 +63,12 @@ async def request(f_req, body_transform=None, user=None, path=None):
         b_cfg = app["config"].get("backends", {})[b_name]
     except KeyError:
         raise aiohttp.web.HTTPUnauthorized(text="Incorrect model")
+
+    if b_cfg["type"] != backend_type:
+        raise _model_error(f_req,
+            "The model %r has type %r and is not supported on %s." %
+                (b_name, b_cfg["type"], f_req.rel_url.path),
+            "model_not_supported")
 
     app.logger.debug("Frontend request: request_id=%s path=%s model=%s",
         f_req["request_id"], f_req.rel_url.path, b_name)
