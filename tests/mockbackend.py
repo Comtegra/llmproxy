@@ -243,9 +243,19 @@ async def marker(req):
             payload["page_count"] = 1
     return aiohttp.web.json_response(payload)
 
+
+@aiohttp.web.middleware
+async def record_path(req, handler):
+    # Lets tests prove a request the proxy rejected never reached a backend.
+    req.app["paths"].append(req.path)
+    return await handler(req)
+
+
 def create_app():
     # Raised so the proxy can forward multi-MiB audio uploads to us in tests.
-    app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3)
+    app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3,
+        middlewares=[record_path])
+    app["paths"] = []
     app.add_routes([
         aiohttp.web.get("/health", health),
         aiohttp.web.post("/v1/chat/completions", chat),

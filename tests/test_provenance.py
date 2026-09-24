@@ -200,7 +200,7 @@ class TestProvenanceRoutes(LLMProxyAppTestCase):
 
     async def test_embeddings_not_marked(self):
         req = self.client.request("POST", "/v1/embeddings", headers=AUTH,
-            json={"model": "mymodel", "input": "hi"})
+            json={"model": "myembedding", "input": "hi"})
         async with req as res:
             self.assertEqual(res.status, 200)
             self.assertNotIn("X-AI-Generated", res.headers)
@@ -212,7 +212,7 @@ class TestProvenanceRoutes(LLMProxyAppTestCase):
 
     async def test_audio_header_only(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mywhisper")
         form.add_field("file", b"RIFFfake-audio", filename="a.wav",
             content_type="audio/wav")
         req = self.client.request("POST", "/v1/audio/transcriptions",
@@ -226,7 +226,7 @@ class TestProvenanceRoutes(LLMProxyAppTestCase):
 
     async def test_file_convert_header_only(self):
         form = aiohttp.FormData()
-        form.add_field("model", "mymodel")
+        form.add_field("model", "mymarker")
         form.add_field("file", b"%PDF-1.4 fake", filename="doc.pdf",
             content_type="application/pdf")
         req = self.client.request("POST", "/v1/files/convert",
