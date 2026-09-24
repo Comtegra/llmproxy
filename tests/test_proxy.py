@@ -670,6 +670,37 @@ class TestModelRouting(LLMProxyAppTestCase):
                     data = await res.json()
                 self.assertEqual(data["error"]["code"], "model_not_supported")
 
+    async def test_unknown_model_is_404_json(self):
+        # Was 401 "Incorrect model" (plain text), which clients read as a bad
+        # API key (some keep retrying it).
+        for path in ("/v1/chat/completions", "/v1/messages",
+                "/v1/files/convert"):
+            with self.subTest(path=path):
+                async with self._post(path, "nosuchmodel") as res:
+                    self.assertEqual(res.status, 404)
+                    data = await res.json()
+
+                if path == "/v1/messages":
+                    self.assertEqual(data["error"]["type"], "not_found_error")
+                else:
+                    self.assertEqual(data["error"]["code"], "model_not_found")
+                    self.assertEqual(data["error"]["param"], "model")
+                self.assertIn("'nosuchmodel'", data["error"]["message"])
+
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_missing_model_is_404_json(self):
+        req = self.client.request("POST", "/v1/chat/completions",
+            headers=self.AUTH,
+            json={"messages": [{"role": "user", "content": "hi"}]})
+        async with req as res:
+            self.assertEqual(res.status, 404)
+            data = await res.json()
+
+        self.assertEqual(data["error"]["code"], "model_not_found")
+        self.assertEqual(data["error"]["message"],
+            "The model None does not exist.")
+
     async def test_rejected_model_does_not_consume_rate_limit(self):
         # The type check runs before ratelimit.slot, so a rejected request
         # must not use up the caller's rpm budget.

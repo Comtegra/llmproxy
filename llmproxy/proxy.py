@@ -24,8 +24,8 @@ def looks_like_context_length_error(body):
 
 
 def _model_error(f_req, message, code):
-    # 404 like OpenAI for a model that exists but is not served on this
-    # endpoint ("This is not a chat model...").
+    # 404 like OpenAI for both an unknown model and a model that exists but is
+    # not served on this endpoint ("This is not a chat model...").
     return errors.json_error(f_req, aiohttp.web.HTTPNotFound, message,
         openai_type="invalid_request_error", anthropic_type="not_found_error",
         code=code, param="model")
@@ -58,11 +58,12 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     else:
         raise aiohttp.web.HTTPUnsupportedMediaType()
 
-    try:
-        b_name = f_body["model"]
-        b_cfg = app["config"].get("backends", {})[b_name]
-    except KeyError:
-        raise aiohttp.web.HTTPUnauthorized(text="Incorrect model")
+    b_name = f_body.get("model")
+    b_cfg = app["config"].get("backends", {}).get(b_name)
+    if b_cfg is None:
+        # %r: a missing "model" reads as None, not as a model named 'None'.
+        raise _model_error(f_req, "The model %r does not exist." % b_name,
+            "model_not_found")
 
     if b_cfg["type"] != backend_type:
         raise _model_error(f_req,

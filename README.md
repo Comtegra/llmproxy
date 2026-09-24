@@ -42,8 +42,9 @@ Each backend must define `type`, which decides the endpoints it is served on:
 A request naming a model on an endpoint of another type (e.g. chat completions
 with an embedding model) is rejected with `404` and `code: model_not_supported`
 before it reaches the backend: it is not billed and does not count against
-rate limits. On `/v1/messages` the error uses the Anthropic shape
-(`not_found_error`). The type is exposed through `/v1/models`.
+rate limits. An unknown model gets `404` with `code: model_not_found`. On
+`/v1/messages` both use the Anthropic error shape (`not_found_error`). The type
+is exposed through `/v1/models`.
 
 **Upgrading:** the proxy refuses to start while any backend lacks a valid
 `type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which
