@@ -110,6 +110,7 @@ class TestMarkerE2E(LLMProxyAppTestCase):
                     "url": MARKER_URL,
                     "token": MARKER_TOKEN,
                     "device": MARKER_DEVICE,
+                    "type": "conversion",
                     # Real conversion is slower than the mock; per-backend
                     # sock_read override (same mechanism as audio).
                     "timeout": 600,

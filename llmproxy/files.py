@@ -42,8 +42,8 @@ async def convert(f_req):
     user = await auth.require_auth(f_req)
 
     async with proxy.request(
-            f_req, prepare_marker_body, user=user, path=MARKER_PATH) as (
-                b_res, b_name, b_cfg):
+            f_req, prepare_marker_body, user=user, path=MARKER_PATH,
+            backend_type="conversion") as (b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
         await proxy.check_response(app, b_name, b_res,

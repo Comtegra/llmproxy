@@ -44,8 +44,8 @@ async def chat(f_req):
 
     user = await auth.require_auth(f_req)
 
-    async with proxy.request(f_req, force_include_usage, user=user) as (
-            b_res, b_name, b_cfg):
+    async with proxy.request(f_req, force_include_usage, user=user,
+            backend_type="chat") as (b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
         await proxy.check_response(app, b_name, b_res,
@@ -94,6 +94,9 @@ async def models(req):
             "object": "model",
             "created": None,
             "owned_by": None,
+            # Which endpoints the model serves (config.BACKEND_TYPES), so a
+            # client can pick the right one instead of hitting a 404.
+            "type": meta["type"],
             "device": meta.get("device"),
             # The real model id / repo name from the config (the upstream
             # model card), so clients can see what we actually serve.

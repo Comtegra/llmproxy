@@ -8,6 +8,12 @@ class ConfigError(Exception):
     pass
 
 
+# Every backend must declare one of these as its ``type``. Each endpoint
+# handler passes the type it serves to proxy.request(), which rejects a model
+# of any other type before the request reaches the backend.
+BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion")
+
+
 def _validate_rate_limit(rl, prefix=""):
     """Validate a ``[rate_limit]`` / ``[backends.X.rate_limit]`` block.
 
@@ -55,6 +61,12 @@ def validate(cfg):
     _validate_rate_limit(cfg.get("rate_limit", {}), "")
 
     for name, meta in cfg.get("backends", {}).items():
+        # Required: without it the proxy cannot tell which endpoints may reach
+        # this backend (e.g. chat completions sent to an embedding model).
+        if meta.get("type") not in BACKEND_TYPES:
+            raise ConfigError('Backend "%s" type must be one of: %s' %
+                (name, ", ".join(BACKEND_TYPES)))
+
         if "max_model_len" in meta:
             value = meta["max_model_len"]
             if type(value) is not int or value <= 0:
