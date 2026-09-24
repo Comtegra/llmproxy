@@ -18,13 +18,12 @@ Counters are process-local and in-memory; a restart resets the windows.
 
 import collections
 import contextlib
-import json
 import math
 import time
 
 import aiohttp.web
 
-from . import metrics
+from . import errors, metrics
 
 # Dimensions enforced in phase 1. Phase 2 appends the two ``*_tpd`` entries.
 _DIMENSIONS = ("rpm", "concurrency")
@@ -81,7 +80,7 @@ def resolve(user, model, cfg):
 def _reject(f_req, dimension, limit, b_name, oldest=None):
     """Build (and return, not raise) the 429 for one dimension.
 
-    Body flavour is chosen by path so client SDKs parse it natively. Retry-After
+    Body flavour follows the client's API (errors.json_error). Retry-After
     is deterministic only for rpm (seconds to the oldest in-window entry
     expiring); concurrency omits it. The rejection metric is incremented here.
     """
@@ -95,18 +94,12 @@ def _reject(f_req, dimension, limit, b_name, oldest=None):
         msg = "Concurrency limit exceeded: %d." % limit
         retry_after = None
 
-    if f_req.rel_url.path == "/v1/messages":
-        body = json.dumps({"type": "error",
-            "error": {"type": "rate_limit_error", "message": msg}})
-    else:
-        body = json.dumps({"error": {"message": msg,
-            "type": "rate_limit_exceeded", "code": "rate_limit_exceeded"}})
-
     headers = {}
     if retry_after is not None:
         headers["Retry-After"] = str(retry_after)
-    return aiohttp.web.HTTPTooManyRequests(text=body,
-        content_type="application/json", headers=headers)
+    return errors.json_error(f_req, aiohttp.web.HTTPTooManyRequests, msg,
+        openai_type="rate_limit_exceeded", anthropic_type="rate_limit_error",
+        code="rate_limit_exceeded", headers=headers)
 
 
 @contextlib.asynccontextmanager
