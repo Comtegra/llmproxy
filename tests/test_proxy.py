@@ -6,6 +6,7 @@ import importlib.resources
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import time
 import unittest
@@ -804,23 +805,36 @@ class TestMalformedBody(LLMProxyAppTestCase):
 
     async def test_undecodable_json_body_is_400(self):
         # Only JSONDecodeError used to be caught; everything else was a 500.
+        # Only a JSON syntax error is described to the client; the rest would
+        # be Python's own wording.
+        undecodable = "Could not decode the request body."
         cases = [
-            ("syntax error", b'{"model": ', "application/json"),
-            ("empty body", b"", "application/json"),
-            ("invalid utf-8", b'{"model": "\xff"}', "application/json"),
+            ("syntax error", b'{"model": ', "application/json", None),
+            ("empty body", b"", "application/json", None),
+            ("invalid utf-8", b'{"model": "\xff"}', "application/json",
+                undecodable),
             ("unknown charset", b'{"model": "mymodel"}',
-                "application/json; charset=no-such-charset"),
+                "application/json; charset=no-such-charset", undecodable),
+            ("charset that isn't text", b'{"model": "mymodel"}',
+                "application/json; charset=base64", undecodable),
             ("deep nesting", b"[" * 100000 + b"]" * 100000,
-                "application/json"),
-            ("int over digit limit", b'{"model": ' + b"9" * 5000 + b"}",
-                "application/json"),
+                "application/json", undecodable),
         ]
-        for name, body, content_type in cases:
+        # Only while the interpreter keeps its int digit limit (on by default).
+        if sys.get_int_max_str_digits():
+            cases.append(("int over digit limit",
+                b'{"model": ' + b"9" * 5000 + b"}", "application/json",
+                undecodable))
+        for name, body, content_type, expected in cases:
             for path in ("/v1/chat/completions", "/v1/messages"):
                 with self.subTest(case=name, path=path):
                     msg = await self._assert_400(
                         self._raw(path, body, content_type), path)
-                    self.assertTrue(msg.startswith("JSON decode error: "), msg)
+                    if expected is None:
+                        self.assertTrue(
+                            msg.startswith("JSON decode error: "), msg)
+                    else:
+                        self.assertEqual(msg, expected)
 
     async def test_json_body_in_declared_charset_still_parsed(self):
         # The fix must not break a body that is valid in its declared charset.
@@ -912,40 +926,60 @@ class TestMalformedBody(LLMProxyAppTestCase):
                     msg = await self._assert_400(req, path)
                     self.assertEqual(msg, expected)
 
-    async def test_malformed_multipart_closes_spooled_files(self):
-        # The file part is spooled to a temp file before the broken part
-        # after it fails the parse. That file must be released (and so
-        # closed) right away, not stay open with its disk space until the
-        # cyclic GC runs, so GC is off here and only refcounting can free it.
-        spooled = []
+    async def test_failed_multipart_releases_spooled_files(self):
+        # The file part is spooled to a temp file before a later part fails
+        # the parse. That file must be released (and so closed) right away,
+        # not stay open with its disk space until the cyclic GC runs, so GC
+        # is off here and only refcounting can free it. Covers a plain error,
+        # one with a chained exception, an assert, and a 413 that is passed
+        # on rather than turned into a 400.
+        file_part = (b'--xyz\r\nContent-Disposition: form-data; name="file"; '
+            b'filename="a.wav"\r\n\r\n' + b"a" * 10000 + b"\r\n")
+        model_part = (b'--xyz\r\nContent-Disposition: form-data; '
+            b'name="model"\r\n')
+        cases = [
+            ("unknown transfer encoding", 400, model_part
+                + b"Content-Transfer-Encoding: rot13\r\n\r\nmywhisper\r\n"
+                b"--xyz--\r\n"),
+            # InvalidHeader, raised with a ValueError as its context
+            ("part header without colon", 400, model_part
+                + b"NoColonHere\r\n\r\nmywhisper\r\n--xyz--\r\n"),
+            ("truncated", 400, model_part + b"\r\nmywhi"),
+            ("field over client_max_size", 413, model_part + b"\r\n"
+                + b"m" * 60000 + b"\r\n--xyz--\r\n"),
+        ]
         temporary_file = tempfile.TemporaryFile
-
-        def tracked_temporary_file(*args, **kwargs):
-            f = temporary_file(*args, **kwargs)
-            spooled.append(weakref.ref(f))
-            return f
-
-        body = (b'--xyz\r\nContent-Disposition: form-data; name="file"; '
-            b'filename="a.wav"\r\n\r\n' + b"a" * 100000 + b"\r\n"
-            b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
-            b"Content-Transfer-Encoding: rot13\r\n\r\nmywhisper\r\n--xyz--\r\n")
         gc.disable()
         self.addCleanup(gc.enable)
-        with mock.patch("tempfile.TemporaryFile", tracked_temporary_file), \
-                warnings.catch_warnings():
-            # Closed by its finalizer, which warns about an unclosed file.
-            warnings.simplefilter("ignore", ResourceWarning)
-            req = self._raw("/v1/audio/transcriptions", body,
-                "multipart/form-data; boundary=xyz")
-            await self._assert_400(req, "/v1/audio/transcriptions")
 
-        self.assertEqual(len(spooled), 1)
-        self.assertIsNone(spooled[0]())
+        for name, status, rest in cases:
+            with self.subTest(case=name):
+                spooled = []
 
-    async def test_malformed_multipart_log_is_bounded(self):
+                def tracked_temporary_file(*args, **kwargs):
+                    f = temporary_file(*args, **kwargs)
+                    spooled.append(weakref.ref(f))
+                    return f
+
+                with mock.patch("tempfile.TemporaryFile",
+                            tracked_temporary_file), \
+                        mock.patch.object(self.app, "_client_max_size",
+                            50000), \
+                        warnings.catch_warnings():
+                    # Closed by its finalizer, which warns about it.
+                    warnings.simplefilter("ignore", ResourceWarning)
+                    req = self._raw("/v1/audio/transcriptions",
+                        file_part + rest, "multipart/form-data; boundary=xyz")
+                    async with req as res:
+                        self.assertEqual(res.status, status)
+
+                self.assertEqual(len(spooled), 1)
+                self.assertIsNone(spooled[0]())
+
+    async def test_malformed_body_log_is_bounded(self):
         # aiohttp's error can quote a whole line of the body (up to 128 KiB,
         # and a repr of it is up to 4x that); the log line must not grow
-        # with it.
+        # with it. It still says where the parse failed.
         body = (b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
             b"\r\nmywhisper\r\n--xyz" + b"\x01" * 100000 + b"\r\n")
         with self.assertLogs("aiohttp.web", level="INFO") as logs:
@@ -953,21 +987,28 @@ class TestMalformedBody(LLMProxyAppTestCase):
                 "multipart/form-data; boundary=xyz")
             await self._assert_400(req, "/v1/audio/transcriptions")
 
-        [line] = [l for l in logs.output if "Malformed multipart body" in l]
+        [line] = [l for l in logs.output if "Malformed request body" in l]
         self.assertLess(len(line), 500)
+        self.assertRegex(line, r" at multipart\.py:\d+ _read_boundary$")
 
-    async def test_multipart_parser_bug_is_not_a_400(self):
-        # KeyError and IndexError are LookupErrors, but from aiohttp they
-        # would be a bug, not bad input: a 500 with a logged traceback.
-        async def post(self):
+    async def test_parser_bug_is_not_a_400(self):
+        # KeyError and IndexError are LookupErrors, but from aiohttp or json
+        # they would be a bug, not bad input: a 500 with a logged traceback.
+        async def fail(self, *args, **kwargs):
             raise KeyError("bug")
 
-        with mock.patch.object(aiohttp.web.BaseRequest, "post", post), \
-                self.assertLogs("aiohttp.server", level="ERROR"):
-            req = self._raw("/v1/audio/transcriptions", b"--xyz--\r\n",
-                "multipart/form-data; boundary=xyz")
-            async with req as res:
-                self.assertEqual(res.status, 500)
+        cases = [
+            ("post", "/v1/audio/transcriptions", b"--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("json", "/v1/chat/completions", b"{}", "application/json"),
+        ]
+        for method, path, body, content_type in cases:
+            with self.subTest(path=path):
+                with mock.patch.object(aiohttp.web.BaseRequest, method,
+                            fail), \
+                        self.assertLogs("aiohttp.server", level="ERROR"):
+                    async with self._raw(path, body, content_type) as res:
+                        self.assertEqual(res.status, 500)
 
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
