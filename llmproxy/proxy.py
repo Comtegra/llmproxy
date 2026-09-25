@@ -1,9 +1,12 @@
 import contextlib
 import json
+import os
 import time
+import traceback
 
 import aiohttp
 import yarl
+from aiohttp import http_exceptions
 
 from . import errors, metrics, ratelimit
 
@@ -31,6 +34,77 @@ def _model_error(f_req, message, code):
         code=code, param="model")
 
 
+def _bad_request(f_req, message, param=None):
+    # 400 for a body the proxy cannot parse or route on. Without these checks
+    # the handler crashed and the client got a 500 (which SDKs retry).
+    return errors.json_error(f_req, aiohttp.web.HTTPBadRequest, message,
+        openai_type="invalid_request_error",
+        anthropic_type="invalid_request_error", param=param)
+
+
+# What aiohttp and the stdlib raise while reading a body the client got wrong:
+# ValueError (bad JSON, text not valid in its charset, an int over Python's
+# digit limit, a bad multipart boundary or base64), LookupError (unknown
+# charset), RuntimeError (JSON nested too deep, unknown transfer encoding),
+# HttpProcessingError (bad multipart part headers), RequestPayloadError (body
+# doesn't match its Content-Encoding) and AssertionError (truncated multipart
+# body, part without a name).
+_MALFORMED_BODY_ERRORS = (ValueError, LookupError, RuntimeError,
+    AssertionError, http_exceptions.HttpProcessingError,
+    aiohttp.web.RequestPayloadError)
+
+
+def _is_malformed_body(e):
+    # KeyError and IndexError are LookupErrors too, but from aiohttp or json
+    # they would be a bug. Those, and anything else (e.g. OSError spooling an
+    # upload to disk), stay 500s.
+    return (isinstance(e, _MALFORMED_BODY_ERRORS)
+        and not isinstance(e, (KeyError, IndexError)))
+
+
+def _raised_at(e):
+    # Where in aiohttp/json it failed, so a bug caught as a "malformed body"
+    # can still be told apart from bad input in the logs.
+    tb = e.__traceback__
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    code = tb.tb_frame.f_code
+    return "%s:%d %s" % (os.path.basename(code.co_filename), tb.tb_lineno,
+        code.co_name)
+
+
+async def _read_body(f_req):
+    """Parse the JSON or multipart body, or raise a 400 if it is malformed."""
+    multipart = f_req.content_type == "multipart/form-data"
+    try:
+        body = await (f_req.post() if multipart else f_req.json())
+    except BaseException as e:
+        # aiohttp only closes the temp files post() spools file parts to
+        # after a successful post(). Otherwise they live on in its frame,
+        # which this traceback (or an exception chained to it) keeps until
+        # the cyclic GC runs. Clearing the frames frees them now, whatever
+        # went wrong.
+        traceback.clear_frames(e.__traceback__)
+        if not _is_malformed_body(e):
+            raise
+        # Truncated: aiohttp's message can quote a whole line of the body.
+        f_req.app.logger.info(
+            "Malformed request body: request_id=%s error=%.200r at %s",
+            f_req["request_id"], e, _raised_at(e))
+        if multipart:
+            message = "Malformed multipart/form-data body."
+        elif isinstance(e, json.JSONDecodeError):
+            message = "JSON decode error: %s" % e
+        else:
+            # The rest is Python's wording (codecs, digit limits, recursion).
+            message = "Could not decode the request body."
+        raise _bad_request(f_req, message)
+
+    if not multipart and not isinstance(body, dict):
+        raise _bad_request(f_req, "The request body must be a JSON object.")
+    return body
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
@@ -48,17 +122,17 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     """
     app = f_req.app
 
-    if f_req.content_type == "application/json":
-        try:
-            f_body = await f_req.json()
-        except json.decoder.JSONDecodeError as e:
-            raise aiohttp.web.HTTPBadRequest(text="JSON decode error: %s" % e)
-    elif f_req.content_type == "multipart/form-data":
-        f_body = await f_req.post()
-    else:
+    if f_req.content_type not in ("application/json", "multipart/form-data"):
         raise aiohttp.web.HTTPUnsupportedMediaType()
+    f_body = await _read_body(f_req)
 
     b_name = f_body.get("model")
+    # A list or object is unhashable (the lookup below would raise), and a
+    # number or bool is never a model name. A missing model (None) falls
+    # through to model_not_found.
+    if b_name is not None and not isinstance(b_name, str):
+        raise _bad_request(f_req,
+            "Invalid type for 'model': expected a string.", param="model")
     b_cfg = app["config"].get("backends", {}).get(b_name)
     if b_cfg is None:
         # %r: a missing "model" reads as None, not as a model named 'None'.
