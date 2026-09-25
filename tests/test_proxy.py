@@ -714,6 +714,176 @@ class TestModelRouting(LLMProxyAppTestCase):
             self.assertEqual(res.status, 200)
 
 
+class TestMalformedBody(LLMProxyAppTestCase):
+    """A request body the proxy cannot parse or route is the client's fault:
+    400 in the client's error format, never a 500 and never forwarded."""
+
+    AUTH = {"Authorization": "Bearer mytoken"}
+
+    # Upload endpoints parse JSON bodies too (only multipart is route-limited).
+    PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/messages",
+        "/v1/responses", "/v1/embeddings", "/v1/audio/transcriptions",
+        "/v1/files/convert")
+    UPLOAD_PATHS = ("/v1/audio/transcriptions", "/v1/files/convert")
+
+    def _raw(self, path, body, content_type="application/json"):
+        return self.client.request("POST", path, data=body,
+            headers={**self.AUTH, "Content-Type": content_type})
+
+    async def _assert_400(self, req, path, param=None):
+        seen = len(self.backend.app["paths"])
+        async with req as res:
+            self.assertEqual(res.status, 400)
+            self.assertIn("X-Request-ID", res.headers)
+            data = await res.json()
+
+        if path == "/v1/messages":
+            self.assertEqual(data["type"], "error")
+            self.assertEqual(data["error"]["type"], "invalid_request_error")
+        else:
+            self.assertEqual(data["error"]["type"], "invalid_request_error")
+            self.assertEqual(data["error"]["param"], param)
+        self.assertEqual(self.backend.app["paths"][seen:], [])
+        self.assertListEqual(await self.get_events(), [])
+        return data["error"]["message"]
+
+    async def test_non_object_json_body_is_400(self):
+        # Valid JSON, but there is no "model" to route on. Used to be a 500
+        # (AttributeError: 'list' object has no attribute 'get').
+        for body in (b"[]", b'[{"model": "mymodel"}]', b'"mymodel"', b"null",
+                b"5", b"1.5", b"true"):
+            for path in self.PATHS:
+                with self.subTest(body=body, path=path):
+                    msg = await self._assert_400(self._raw(path, body), path)
+                    self.assertEqual(msg,
+                        "The request body must be a JSON object.")
+
+    async def test_non_string_model_is_400(self):
+        # Lists and objects used to be a 500 (unhashable dict key); numbers
+        # and booleans a misleading 404 "The model True does not exist.".
+        for model in (["mymodel"], {"id": "mymodel"}, [], {}, 123, 1.5,
+                True):
+            for path in self.PATHS:
+                with self.subTest(model=model, path=path):
+                    body = json.dumps({"model": model, "input": "hi",
+                        "messages": [{"role": "user", "content": "hi"}]})
+                    msg = await self._assert_400(self._raw(path, body), path,
+                        param="model")
+                    self.assertEqual(msg,
+                        "Invalid type for 'model': expected a string.")
+
+    async def test_non_string_multipart_model_is_400(self):
+        # A "model" part sent as a file becomes a FileField, one with a
+        # non-text Content-Type a bytearray. Both are unhashable: used to be
+        # a 500.
+        file_part = (b'--xyz\r\nContent-Disposition: form-data; name="file"; '
+            b'filename="f.bin"\r\n\r\npayload\r\n--xyz--\r\n')
+        parts = {
+            "file": b'--xyz\r\nContent-Disposition: form-data; name="model"; '
+                b'filename="model.txt"\r\n\r\nmywhisper\r\n',
+            "bytes": b'--xyz\r\nContent-Disposition: form-data; name="model"'
+                b"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                b"mywhisper\r\n",
+        }
+        for path in self.UPLOAD_PATHS:
+            for kind, part in parts.items():
+                with self.subTest(path=path, model_part=kind):
+                    req = self._raw(path, part + file_part,
+                        "multipart/form-data; boundary=xyz")
+                    await self._assert_400(req, path, param="model")
+
+    async def test_null_model_is_still_404(self):
+        # null is "no model": model_not_found, like a missing key.
+        async with self._raw("/v1/chat/completions", b'{"model": null}') as res:
+            self.assertEqual(res.status, 404)
+            data = await res.json()
+        self.assertEqual(data["error"]["code"], "model_not_found")
+
+    async def test_undecodable_json_body_is_400(self):
+        # Only JSONDecodeError used to be caught; everything else was a 500.
+        cases = [
+            ("syntax error", b'{"model": ', "application/json"),
+            ("empty body", b"", "application/json"),
+            ("invalid utf-8", b'{"model": "\xff"}', "application/json"),
+            ("unknown charset", b'{"model": "mymodel"}',
+                "application/json; charset=no-such-charset"),
+            ("deep nesting", b"[" * 100000 + b"]" * 100000,
+                "application/json"),
+            ("int over digit limit", b'{"model": ' + b"9" * 5000 + b"}",
+                "application/json"),
+        ]
+        for name, body, content_type in cases:
+            for path in ("/v1/chat/completions", "/v1/messages"):
+                with self.subTest(case=name, path=path):
+                    msg = await self._assert_400(
+                        self._raw(path, body, content_type), path)
+                    self.assertTrue(msg.startswith("JSON decode error: "), msg)
+
+    async def test_json_body_in_declared_charset_still_parsed(self):
+        # The fix must not break a body that is valid in its declared charset.
+        body = json.dumps({"model": "mymodel",
+            "messages": [{"role": "user", "content": "zażółć"}]})
+        req = self._raw("/v1/chat/completions", body.encode("utf-16"),
+            "application/json; charset=utf-16")
+        async with req as res:
+            self.assertEqual(res.status, 200)
+
+    async def test_malformed_multipart_is_400(self):
+        part = (b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+            b'\r\nmywhisper\r\n')
+        file_part = (b'--xyz\r\nContent-Disposition: form-data; name="file"; '
+            b'filename="a.wav"\r\n')
+        cases = [
+            ("no boundary", b"garbage", "multipart/form-data"),
+            ("garbage body", b"garbage", "multipart/form-data; boundary=xyz"),
+            # aiohttp's reader asserts here (AssertionError: Reading after EOF)
+            ("truncated", part[:-2], "multipart/form-data; boundary=xyz"),
+            # ...and here (assert field.name is not None)
+            ("part without name",
+                b'--xyz\r\nContent-Disposition: form-data\r\n\r\nx\r\n'
+                b"--xyz--\r\n", "multipart/form-data; boundary=xyz"),
+            ("unknown transfer encoding", part + file_part
+                + b"Content-Transfer-Encoding: rot13\r\n\r\nabc\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("bad base64", part + file_part
+                + b"Content-Transfer-Encoding: base64\r\n\r\na\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("unknown part charset",
+                b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+                b"Content-Type: text/plain; charset=no-such-charset\r\n\r\n"
+                b"mywhisper\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("invalid utf-8 field",
+                b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+                b"\r\n\xff\xfe\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            # http_exceptions.InvalidHeader
+            ("part header without colon",
+                b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+                b"NoColonHere\r\n\r\nmywhisper\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            # http_exceptions.LineTooLong
+            ("part header too long",
+                b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+                b"X-Pad: " + b"a" * 20000 + b"\r\n\r\nmywhisper\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("nested multipart",
+                b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+                b"Content-Type: multipart/mixed; boundary=abc\r\n\r\n"
+                b"--abc\r\n\r\nx\r\n--abc--\r\n--xyz--\r\n",
+                "multipart/form-data; boundary=xyz"),
+            ("boundary over 70 chars", b"--" + b"b" * 80 + b"\r\n",
+                "multipart/form-data; boundary=" + "b" * 80),
+        ]
+        for name, body, content_type in cases:
+            for path in self.UPLOAD_PATHS:
+                with self.subTest(case=name, path=path):
+                    msg = await self._assert_400(
+                        self._raw(path, body, content_type), path)
+                    self.assertEqual(msg,
+                        "Malformed multipart/form-data body.")
+
+
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_requires_known_backend_type(self):
         # Required: a backend without a type would let any endpoint reach it
