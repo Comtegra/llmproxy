@@ -4,6 +4,7 @@ import time
 
 import aiohttp
 import yarl
+from aiohttp import http_exceptions
 
 from . import errors, metrics, ratelimit
 
@@ -31,6 +32,14 @@ def _model_error(f_req, message, code):
         code=code, param="model")
 
 
+def _bad_request(f_req, message, param=None):
+    # 400 for a body the proxy cannot parse or route on. Without these checks
+    # the handler crashed and the client got a 500 (which SDKs retry).
+    return errors.json_error(f_req, aiohttp.web.HTTPBadRequest, message,
+        openai_type="invalid_request_error",
+        anthropic_type="invalid_request_error", param=param)
+
+
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
@@ -51,14 +60,36 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     if f_req.content_type == "application/json":
         try:
             f_body = await f_req.json()
-        except json.decoder.JSONDecodeError as e:
-            raise aiohttp.web.HTTPBadRequest(text="JSON decode error: %s" % e)
+        # ValueError also covers a body that is not valid in its charset
+        # (UnicodeDecodeError) and ints over Python's digit limit; LookupError
+        # is an unknown charset, RecursionError deeply nested arrays.
+        except (ValueError, LookupError, RecursionError) as e:
+            raise _bad_request(f_req, "JSON decode error: %s" % e)
+        if not isinstance(f_body, dict):
+            raise _bad_request(f_req, "The request body must be a JSON object.")
     elif f_req.content_type == "multipart/form-data":
-        f_body = await f_req.post()
+        try:
+            f_body = await f_req.post()
+        # What aiohttp's multipart reader raises on malformed input: ValueError
+        # (boundary, base64, charset), LookupError (unknown part charset),
+        # RuntimeError (unknown transfer encoding), HttpProcessingError (part
+        # headers) and AssertionError (truncated body, part without a name).
+        # OSError from spooling an upload to disk is ours and stays a 500.
+        except (ValueError, LookupError, RuntimeError, AssertionError,
+                http_exceptions.HttpProcessingError) as e:
+            app.logger.info("Malformed multipart body: request_id=%s error=%r",
+                f_req["request_id"], e)
+            raise _bad_request(f_req, "Malformed multipart/form-data body.")
     else:
         raise aiohttp.web.HTTPUnsupportedMediaType()
 
     b_name = f_body.get("model")
+    # A list or object is unhashable (the lookup below would raise), and a
+    # number or bool is never a model name. A missing model (None) falls
+    # through to model_not_found.
+    if b_name is not None and not isinstance(b_name, str):
+        raise _bad_request(f_req,
+            "Invalid type for 'model': expected a string.", param="model")
     b_cfg = app["config"].get("backends", {}).get(b_name)
     if b_cfg is None:
         # %r: a missing "model" reads as None, not as a model named 'None'.
