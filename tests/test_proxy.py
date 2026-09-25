@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import hashlib
 import importlib
 import importlib.resources
@@ -9,6 +10,8 @@ import tempfile
 import time
 import unittest
 import warnings
+import weakref
+from unittest import mock
 
 import aiohttp
 import aiohttp.test_utils
@@ -882,6 +885,89 @@ class TestMalformedBody(LLMProxyAppTestCase):
                         self._raw(path, body, content_type), path)
                     self.assertEqual(msg,
                         "Malformed multipart/form-data body.")
+
+    async def test_body_not_matching_content_encoding_is_400(self):
+        # aiohttp decompresses by Content-Encoding and fails the read with
+        # RequestPayloadError when the body isn't actually compressed.
+        form = (b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+            b"\r\nmywhisper\r\n--xyz--\r\n")
+        cases = [
+            ("/v1/chat/completions", b'{"model": "mymodel"}',
+                "application/json", "Could not decode the request body."),
+            ("/v1/messages", b'{"model": "mymodel"}',
+                "application/json", "Could not decode the request body."),
+            ("/v1/audio/transcriptions", form,
+                "multipart/form-data; boundary=xyz",
+                "Malformed multipart/form-data body."),
+            ("/v1/files/convert", form,
+                "multipart/form-data; boundary=xyz",
+                "Malformed multipart/form-data body."),
+        ]
+        for encoding in ("gzip", "deflate"):
+            for path, body, content_type, expected in cases:
+                with self.subTest(encoding=encoding, path=path):
+                    req = self.client.request("POST", path, data=body,
+                        headers={**self.AUTH, "Content-Type": content_type,
+                            "Content-Encoding": encoding})
+                    msg = await self._assert_400(req, path)
+                    self.assertEqual(msg, expected)
+
+    async def test_malformed_multipart_closes_spooled_files(self):
+        # The file part is spooled to a temp file before the broken part
+        # after it fails the parse. That file must be released (and so
+        # closed) right away, not stay open with its disk space until the
+        # cyclic GC runs, so GC is off here and only refcounting can free it.
+        spooled = []
+        temporary_file = tempfile.TemporaryFile
+
+        def tracked_temporary_file(*args, **kwargs):
+            f = temporary_file(*args, **kwargs)
+            spooled.append(weakref.ref(f))
+            return f
+
+        body = (b'--xyz\r\nContent-Disposition: form-data; name="file"; '
+            b'filename="a.wav"\r\n\r\n' + b"a" * 100000 + b"\r\n"
+            b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+            b"Content-Transfer-Encoding: rot13\r\n\r\nmywhisper\r\n--xyz--\r\n")
+        gc.disable()
+        self.addCleanup(gc.enable)
+        with mock.patch("tempfile.TemporaryFile", tracked_temporary_file), \
+                warnings.catch_warnings():
+            # Closed by its finalizer, which warns about an unclosed file.
+            warnings.simplefilter("ignore", ResourceWarning)
+            req = self._raw("/v1/audio/transcriptions", body,
+                "multipart/form-data; boundary=xyz")
+            await self._assert_400(req, "/v1/audio/transcriptions")
+
+        self.assertEqual(len(spooled), 1)
+        self.assertIsNone(spooled[0]())
+
+    async def test_malformed_multipart_log_is_bounded(self):
+        # aiohttp's error can quote a whole line of the body (up to 128 KiB,
+        # and a repr of it is up to 4x that); the log line must not grow
+        # with it.
+        body = (b'--xyz\r\nContent-Disposition: form-data; name="model"\r\n'
+            b"\r\nmywhisper\r\n--xyz" + b"\x01" * 100000 + b"\r\n")
+        with self.assertLogs("aiohttp.web", level="INFO") as logs:
+            req = self._raw("/v1/audio/transcriptions", body,
+                "multipart/form-data; boundary=xyz")
+            await self._assert_400(req, "/v1/audio/transcriptions")
+
+        [line] = [l for l in logs.output if "Malformed multipart body" in l]
+        self.assertLess(len(line), 500)
+
+    async def test_multipart_parser_bug_is_not_a_400(self):
+        # KeyError and IndexError are LookupErrors, but from aiohttp they
+        # would be a bug, not bad input: a 500 with a logged traceback.
+        async def post(self):
+            raise KeyError("bug")
+
+        with mock.patch.object(aiohttp.web.BaseRequest, "post", post), \
+                self.assertLogs("aiohttp.server", level="ERROR"):
+            req = self._raw("/v1/audio/transcriptions", b"--xyz--\r\n",
+                "multipart/form-data; boundary=xyz")
+            async with req as res:
+                self.assertEqual(res.status, 500)
 
 
 class TestConfigValidation(unittest.IsolatedAsyncioTestCase):

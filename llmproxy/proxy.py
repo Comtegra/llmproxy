@@ -60,6 +60,9 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     if f_req.content_type == "application/json":
         try:
             f_body = await f_req.json()
+        # The body doesn't match its Content-Encoding (e.g. gzip that isn't).
+        except aiohttp.web.RequestPayloadError:
+            raise _bad_request(f_req, "Could not decode the request body.")
         # ValueError also covers a body that is not valid in its charset
         # (UnicodeDecodeError) and ints over Python's digit limit; LookupError
         # is an unknown charset, RecursionError deeply nested arrays.
@@ -70,15 +73,27 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     elif f_req.content_type == "multipart/form-data":
         try:
             f_body = await f_req.post()
+        # LookupErrors too, but coming from aiohttp these would be a bug.
+        except (KeyError, IndexError):
+            raise
         # What aiohttp's multipart reader raises on malformed input: ValueError
         # (boundary, base64, charset), LookupError (unknown part charset),
         # RuntimeError (unknown transfer encoding), HttpProcessingError (part
-        # headers) and AssertionError (truncated body, part without a name).
-        # OSError from spooling an upload to disk is ours and stays a 500.
+        # headers), RequestPayloadError (body doesn't match Content-Encoding)
+        # and AssertionError (truncated body, part without a name). OSError
+        # from spooling an upload to disk is ours and stays a 500.
         except (ValueError, LookupError, RuntimeError, AssertionError,
-                http_exceptions.HttpProcessingError) as e:
-            app.logger.info("Malformed multipart body: request_id=%s error=%r",
+                http_exceptions.HttpProcessingError,
+                aiohttp.web.RequestPayloadError) as e:
+            # Truncated: the message can quote a whole line of the body.
+            app.logger.info(
+                "Malformed multipart body: request_id=%s error=%.200r",
                 f_req["request_id"], e)
+            # aiohttp closes the temp files post() spools file parts to only
+            # after a successful post(). Here they live on in its frame, which
+            # the traceback keeps (fd and disk) until the cyclic GC gets to
+            # it. Dropping the traceback frees them now.
+            e.__traceback__ = None
             raise _bad_request(f_req, "Malformed multipart/form-data body.")
     else:
         raise aiohttp.web.HTTPUnsupportedMediaType()
