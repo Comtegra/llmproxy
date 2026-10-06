@@ -32,11 +32,21 @@ Prometheus.  The following metric families are provided:
   llmproxy_file_conversions_total{model}
       Counter — PDF pages converted to Markdown.
 
+  llmproxy_user_requests_total{user, model}
+      Counter — requests admitted to a backend, per user and model. The
+      ``user`` label is the api-key comment (the human identity set with
+      llmproxyctl), falling back to the key id when there is no comment.
+
+  llmproxy_user_active_requests{user, model}
+      Gauge — in-flight requests per user and model; non-zero series show
+      who is connected to which model right now.
+
   llmproxy_auth_cache_hits_total / llmproxy_auth_cache_misses_total
       Counter — API-key lookups served from memory vs from the database.
       A hit rate near zero means auth_cache_ttl is too short to help.
 """
 
+import contextlib
 import time
 
 import aiohttp.web
@@ -150,6 +160,60 @@ RATE_LIMIT_REJECTIONS_TOTAL = prometheus_client.Counter(
     labelnames=("model", "dimension"),
     registry=_REGISTRY,
 )
+
+# ---------------------------------------------------------------------------
+# Per-user activity
+#
+# ``user`` label cardinality is bounded by the api_key table: the label
+# value comes from the auth row, never from client input.
+# ---------------------------------------------------------------------------
+
+USER_REQUESTS_TOTAL = prometheus_client.Counter(
+    "llmproxy_user_requests_total",
+    "Requests admitted to a backend, per user and model.",
+    labelnames=("user", "model"),
+    registry=_REGISTRY,
+)
+
+USER_ACTIVE_REQUESTS = prometheus_client.Gauge(
+    "llmproxy_user_active_requests",
+    "In-flight requests per user and model.",
+    labelnames=("user", "model"),
+    registry=_REGISTRY,
+)
+
+# Label value when no auth row is available (fixed string, so cardinality
+# stays bounded even for unauthenticated paths).
+ANONYMOUS_USER = "__anon__"
+
+
+def user_label(user):
+    """Human identity of an auth row for metric labels.
+
+    The comment is the owner's name as set at key creation (shown by
+    ``llmproxyctl user list``); a key without one falls back to its unique
+    id so the label is never empty.
+    """
+    if not user:
+        return ANONYMOUS_USER
+    return user.get("comment") or user["id"]
+
+
+@contextlib.contextmanager
+def track_user_request(user, model):
+    """Count one admitted request per user+model, in-flight until it exits.
+
+    The gauge is released in ``finally``, so it covers completion, handler
+    exceptions, backend timeouts and mid-stream client disconnects — the
+    same coverage as the rate-limit concurrency slot.
+    """
+    label = user_label(user)
+    USER_REQUESTS_TOTAL.labels(label, model).inc()
+    USER_ACTIVE_REQUESTS.labels(label, model).inc()
+    try:
+        yield
+    finally:
+        USER_ACTIVE_REQUESTS.labels(label, model).dec()
 
 # ---------------------------------------------------------------------------
 # Helpers

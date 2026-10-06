@@ -113,6 +113,16 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
 
         return app
 
+    async def insert_key(self, token, id_, comment=None):
+        """Insert an api_key row straight into the test database."""
+        secret = hashlib.sha256(token.encode()).hexdigest()
+        db = await get_db(self.app["config"]["db"]["uri"])
+        await db.db.execute(
+            "INSERT INTO api_key (id, secret, type, comment) "
+            "VALUES (?, ?, 'LLM', ?)", (id_, secret, comment))
+        await db.db.commit()
+        await db.close()
+
     async def get_events(self, expect=None, timeout=5.0):
         """Read the billed events.
 
@@ -1276,6 +1286,100 @@ class TestMetrics(LLMProxyAppTestCase):
             text = await res.text()
 
         self.assertIn("llmproxy_active_requests", text)
+
+
+    async def test_user_metrics_label_is_key_comment(self):
+        """Per-user metrics are labelled by the api-key comment."""
+        await self.insert_key("alicetoken", "aliceid", comment="Alice")
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer alicetoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+
+        # Unique user+model combination for this test, so the exact value
+        # is assertable despite the process-global counter.
+        lines = [line for line in parsed["llmproxy_user_requests_total"]
+            if 'user="Alice"' in line and 'model="mymodel"' in line]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(float(lines[0].rsplit(" ", 1)[1]), 1.0)
+
+    async def test_user_metrics_label_falls_back_to_key_id(self):
+        """A key without a comment is labelled by its unique id."""
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        async with self.client.request("POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer mytoken"}, json=body) as res:
+            self.assertEqual(res.status, 200)
+
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+
+        found = any('user="myuser"' in line and 'model="mymodel"' in line
+            for line in parsed["llmproxy_user_requests_total"])
+        self.assertTrue(found,
+            "llmproxy_user_requests_total missing myuser/mymodel")
+
+    async def test_user_active_requests_gauge_tracks_inflight(self):
+        """The per-user gauge is 1 while in flight, back to 0 after."""
+        body = {"model": "slowok", "_trigger_error": "slow",
+            "messages": [{"role": "user", "content": "hi"}]}
+
+        async def one():
+            async with self.client.request("POST", "/v1/chat/completions",
+                    headers={"Authorization": "Bearer mytoken"},
+                    json=body) as res:
+                await res.read()
+                return res.status
+
+        task = asyncio.ensure_future(one())
+        await asyncio.sleep(0.3)  # the request is in flight (slow backend)
+
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+        mid = [line for line in parsed["llmproxy_user_active_requests"]
+            if 'user="myuser"' in line and 'model="slowok"' in line]
+        self.assertEqual(len(mid), 1)
+        self.assertEqual(float(mid[0].rsplit(" ", 1)[1]), 1.0)
+
+        self.assertEqual(await task, 200)
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+        after = [line for line in parsed["llmproxy_user_active_requests"]
+            if 'user="myuser"' in line and 'model="slowok"' in line]
+        self.assertEqual(len(after), 1)
+        self.assertEqual(float(after[0].rsplit(" ", 1)[1]), 0.0)
+
+    async def test_rate_limited_request_not_counted_as_user_usage(self):
+        """A 429 is rejected before the backend call: no per-user count."""
+        self.app["config"]["rate_limit"] = {"rpm": 1}
+        self.app["config"]["backends"]["mymodel"]["rate_limit"] = {}
+        ratelimit.flush()
+
+        async def user_count():
+            async with self.client.request("GET", "/metrics") as res:
+                parsed = _parse_metrics(await res.text())
+            line = next((line for line
+                    in parsed["llmproxy_user_requests_total"]
+                    if 'user="myuser"' in line and 'model="mymodel"' in line),
+                None)
+            return float(line.rsplit(" ", 1)[1]) if line else 0.0
+
+        before = await user_count()
+        statuses = []
+        body = {"model": "mymodel",
+            "messages": [{"role": "user", "content": "hi"}]}
+        for _ in range(2):
+            async with self.client.request("POST", "/v1/chat/completions",
+                    headers={"Authorization": "Bearer mytoken"},
+                    json=body) as res:
+                statuses.append(res.status)
+                await res.read()
+        self.assertEqual(statuses, [200, 429])
+        self.assertEqual(await user_count(), before + 1)
 
     async def test_metrics_endpoint_itself_is_counted(self):
         """The /metrics scrape is also counted by the middleware."""

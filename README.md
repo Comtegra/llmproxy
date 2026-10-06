@@ -102,6 +102,8 @@ path = "/metrics"     # path under which metrics are served
 | `llmproxy_tokens_total` | Counter | `model`, `type` | Tokens processed (prompt, completion, embedding) |
 | `llmproxy_audio_seconds_total` | Counter | `model` | Seconds of audio transcribed |
 | `llmproxy_file_conversions_total` | Counter | `model` | PDF pages converted to Markdown |
+| `llmproxy_user_requests_total` | Counter | `user`, `model` | Admitted requests per user (api-key comment, else key id) and model |
+| `llmproxy_user_active_requests` | Gauge | `user`, `model` | In-flight requests per user and model — non-zero series are who is connected right now |
 
 ### Quick start (Kubernetes + Prometheus Operator)
 
@@ -141,8 +143,11 @@ from deploy to Grafana is:
    - Grafana → Dashboards → New → Import → Upload JSON file
    - Select [grafana/dashboard.json](grafana/dashboard.json)
    - Choose your Prometheus datasource
-   - The dashboard has 10 panels: request rate, error rate, status codes,
-     active requests, latency percentiles, backend latency/errors, token usage
+   - The dashboard has 13 panels: request rate, error rate, status codes,
+     active requests, latency percentiles, backend latency/errors, token
+     usage, plus per-user visibility — connected right now (user × model,
+     in-flight), request rate by user, and user × model activity over the
+     last 15 minutes
 
 ### Prometheus scrape config (standalone, non-Operator)
 

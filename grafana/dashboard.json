@@ -213,6 +213,65 @@
           "custom": {"drawStyle": "line", "lineWidth": 2}
         }
       }
+    },
+    {
+      "id": 11,
+      "title": "Connected Right Now (user × model, in-flight)",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (user, model) (llmproxy_user_active_requests) > 0",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{user}} — {{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Request Rate by User (req/s)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (user) (rate(llmproxy_user_requests_total[1m]))",
+          "legendFormat": "{{user}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineWidth": 2, "stacking": {"mode": "normal"}}
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "User × Model Activity (requests, last 15m)",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (user, model) (increase(llmproxy_user_requests_total[15m])) > 0",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{user}} — {{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     }
   ]
 }
