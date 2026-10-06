@@ -194,14 +194,18 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
             sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
         b_start = time.monotonic()
         async with ratelimit.slot(f_req, user, b_name, b_cfg):
-            async with app["client"].post(
-                    b_url, headers=b_hdrs, data=b_body, ssl=ssl,
-                    timeout=timeout) as b_res:
-                metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
-                    time.monotonic() - b_start)
-                metrics.BACKEND_REQUESTS_TOTAL.labels(
-                    b_name, str(b_res.status)).inc()
-                yield b_res, b_name, b_cfg
+            # Per-user visibility, inside the slot: a 429 never reaches the
+            # backend, so it must not count as that user's model usage. The
+            # in-flight gauge is released on every exit path (see finally).
+            with metrics.track_user_request(user, b_name):
+                async with app["client"].post(
+                        b_url, headers=b_hdrs, data=b_body, ssl=ssl,
+                        timeout=timeout) as b_res:
+                    metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+                        time.monotonic() - b_start)
+                    metrics.BACKEND_REQUESTS_TOTAL.labels(
+                        b_name, str(b_res.status)).inc()
+                    yield b_res, b_name, b_cfg
     except aiohttp.ServerTimeoutError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
