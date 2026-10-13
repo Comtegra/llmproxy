@@ -184,11 +184,29 @@ A pre-built Grafana dashboard is available at
 [grafana/dashboard.json](grafana/dashboard.json).
 Import it via Dashboards → New → Import → Upload JSON file.
 
+## Output budgets
+
+The optional [budget contract](docs/budget-contract.md) exposes forwarded output
+limits, backend stop signals and reasoning usage through the model catalog,
+HTTP headers, non-streaming JSON and Prometheus. It is off by default.
+`mode = "observe"` leaves budgets untouched; `mode = "enforce"` independently
+enables configured defaults and clamping. JSON metadata and headers have
+separate switches, and config reloads on SIGHUP.
+
+Native reasoning budgeting is verified only for Chat Completions; the tested
+Qwen/vLLM 0.26.0 backend ignores that parameter on Responses and Messages.
+The contract documents this limitation and the live E2E evidence.
+
 ## Testing
 
 ```sh
 python3 -m unittest
 ```
+
+Live budget tests are opt-in: set `BUDGET_VLLM_URL`, `BUDGET_VLLM_TOKEN` and
+`BUDGET_VLLM_MODEL`, then run `python3 -m unittest tests.test_e2e_budget -v`.
+The [contract documentation](docs/budget-contract.md#verification-and-live-evidence)
+describes the backend requirements and bounded generation limits.
 
 ## Building the image
 

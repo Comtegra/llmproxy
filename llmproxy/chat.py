@@ -5,7 +5,7 @@ import logging
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, metrics, provenance, proxy, streaming
+from . import auth, billing, budget, metrics, provenance, proxy, streaming
 
 
 class _ChatStreamUsage:
@@ -51,18 +51,20 @@ async def chat(f_req):
         await proxy.check_response(app, b_name, b_res,
             request_id=f_req["request_id"])
 
-        if "text/event-stream" in b_res.headers.get("Content-Type", ""):
+        is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+        if is_stream:
             usage_acc = _ChatStreamUsage()
-            f_res = await streaming.stream_through(f_req, b_res, usage_acc,
-                extra_headers=provenance.headers(app["config"]))
+            f_res = await streaming.stream_through(f_req, b_res,
+                budget.observer(f_req, usage_acc),
+                extra_headers={**provenance.headers(app["config"]),
+                    **budget.headers(f_req, stream=True)})
             usage = usage_acc.usage()
         else:
             body = await b_res.content.read()
             data = json.loads(body, parse_float=decimal.Decimal)
             f_hdrs = {"Content-Type":
                 b_res.headers.get("Content-Type", "application/octet-stream")}
-            body, p_hdrs = provenance.mark(app["config"], body, data, b_name,
-                f_req["request_id"])
+            body, p_hdrs = budget.mark(f_req, body, data, b_name)
             f_hdrs.update(p_hdrs)
             f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
             usage = data["usage"]
@@ -80,15 +82,14 @@ async def chat(f_req):
 
         metrics.observe_text_tokens(b_name,
             usage["prompt_tokens"], usage["completion_tokens"])
+        budget.record(f_req, b_name, is_stream)
 
         return f_res
 
 
-async def models(req):
-    await auth.require_auth(req)
-
-    models = []
-    for model, meta in req.app["config"].get("backends", {}).items():
+def model_items(cfg):
+    items = []
+    for model, meta in cfg.get("backends", {}).items():
         item = {
             "id": model,
             "object": "model",
@@ -104,12 +105,27 @@ async def models(req):
         }
         if "max_model_len" in meta:
             item["max_model_len"] = meta["max_model_len"]
-        models.append(item)
+        item.update(budget.catalog(cfg, meta))
+        items.append(item)
+    return items
+
+
+async def models(req):
+    await auth.require_auth(req)
+    items = model_items(req.app["config"])
 
     data = {
         "object": "list",
-        "data": models,
+        "data": items,
     }
 
     return aiohttp.web.Response(text=json.dumps(data),
         content_type="application/json")
+
+
+async def model(req):
+    await auth.require_auth(req)
+    for item in model_items(req.app["config"]):
+        if item["id"] == req.match_info["id"]:
+            return aiohttp.web.json_response(item)
+    raise proxy._model_error(req, "The model does not exist.", "model_not_found")

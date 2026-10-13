@@ -186,6 +186,19 @@ USER_ACTIVE_REQUESTS = prometheus_client.Gauge(
 # stays bounded even for unauthenticated paths).
 ANONYMOUS_USER = "__anon__"
 
+BUDGET_SOURCE_TOTAL = prometheus_client.Counter(
+    "llmproxy_budget_source_total", "Observed forwarded output budget source.",
+    ("model", "source", "clamped"), registry=_REGISTRY)
+TRUNCATION_TOTAL = prometheus_client.Counter(
+    "llmproxy_truncation_total", "Backend-reported output truncations.",
+    ("model", "reason", "stream"), registry=_REGISTRY)
+REASONING_TOKENS_TOTAL = prometheus_client.Counter(
+    "llmproxy_reasoning_tokens_total", "Reported reasoning tokens (not added to billing).",
+    ("model",), registry=_REGISTRY)
+REASONING_DETAILS_TOTAL = prometheus_client.Counter(
+    "llmproxy_reasoning_details_total", "Reasoning details: present, inconsistent or missing_or_invalid.",
+    ("model", "availability"), registry=_REGISTRY)
+
 
 def user_label(user):
     """Human identity of an auth row for metric labels.
@@ -279,7 +292,9 @@ async def metrics_middleware(req, handler):
     finally:
         duration = time.monotonic() - start
         ACTIVE_REQUESTS.dec()
-        path = _normalize_path(req.rel_url.path,
+        resource = req.match_info.route.resource
+        canonical = resource.canonical if resource is not None else req.rel_url.path
+        path = _normalize_path(canonical,
             req.app.get("known_paths") or frozenset())
         labels = (req.method, path, str(status))
         REQUESTS_TOTAL.labels(*labels).inc()

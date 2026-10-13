@@ -121,6 +121,33 @@ uri = "sqlite://db.sqlite"
 #rpm = 30
 #concurrency = 3
 
+# Output-budget contract: OFF unless [budget].enabled = true AND the backend
+# has output_budget. See docs/budget-contract.md for semantics and live evidence.
+# All tables below are commented examples; existing configs remain unchanged.
+#[budget]
+#enabled = true
+#echo_headers = true
+#echo_body = true  # turn off JSON metadata for strict response parsers
+
+#[backends.llama3-8b.output_budget]
+#mode = "observe"  # changes NO output/reasoning limits; "enforce" opts into policy
+#default_max_tokens = 4096
+#ceiling = 8192  # per candidate, not a remaining-context or monetary guarantee
+#apply_default = false  # requires default_max_tokens; only effective in enforce mode
+#clamp = false          # requires ceiling; only effective in enforce mode
+#backend_default_max_tokens = 32000  # optional operator note, NOT an effective limit
+
+# Native reasoning control is deliberately limited to /v1/chat/completions.
+# Enable only after a live PoC for this model/parser/deployment; requires an
+# output_budget section in enforce mode to change requests. vLLM 0.26.0 Qwen
+# PoC: top-level thinking_token_budget works on chat, ignored on responses/messages.
+#[backends.llama3-8b.reasoning]
+#native_budget = false
+#endpoints = ["chat"]
+#reserve_content_tokens = 1024  # subtract from forwarded output allowance
+#effort_budgets = { low = 256, medium = 1024, high = 2048 }
+#default_effort = "low"  # optional; OMIT for no default, TOML has no null
+
 # Example vLLM embedding backend (/v1/embeddings only). Billed as
 # bge-m3/<device>/embedding (prompt tokens).
 #[backends.bge-m3]

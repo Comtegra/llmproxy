@@ -103,20 +103,25 @@ def _default(value):
         % type(value).__name__)
 
 
-def mark(cfg, body, data, model_id, request_id):
+def mark(cfg, body, data, model_id, request_id, *, extra_fields=None):
     """Mark one parsed non-streaming generative response.
 
     Returns ``(body_bytes, extra_headers)``: ``data`` (the parsed ``body``)
-    with a top-level ``provenance`` object injected -- mutated in place, but
+    with a top-level ``provenance`` object and optional ``extra_fields`` injected
+    in ONE serialization -- mutated in place, but
     only a top-level key is added, so the caller's later ``usage`` extraction
     is unaffected -- re-serialized; or the untouched upstream ``body`` and {}
     when disabled. An upstream top-level ``provenance`` key would be REPLACED
     (no supported backend emits one; the proxy's marking is authoritative).
     """
     hdrs = headers(cfg)
-    if not hdrs:
+    if not hdrs and not extra_fields:
         return body, {}
-    data[FIELD] = build(cfg, model_id, request_id)
+    fields = dict(extra_fields or {})
+    if hdrs:
+        fields[FIELD] = build(cfg, model_id, request_id)
+    original = {key: data[key] for key in fields if key in data}
+    data.update(fields)
     try:
         try:
             # ensure_ascii=False + compact separators keep the bytes close to
@@ -135,12 +140,14 @@ def mark(cfg, body, data, model_id, request_id):
                 "with ASCII escapes (request_id=%s)", model_id, request_id)
             marked = json.dumps(data, ensure_ascii=True,
                 separators=(",", ":"), default=_default).encode("utf-8")
-    except OverflowError:
+    except (OverflowError, TypeError, ValueError):
         # _default: a finite number beyond double range cannot be re-emitted
         # as valid JSON. Unreachable from real LLM payloads; forward the
         # upstream bytes and keep the header layer of the marking.
         logging.warning("Number out of double range in %s response; "
             "forwarding unmarked body (request_id=%s)", model_id, request_id)
-        data.pop(FIELD, None)
+        for key in fields:
+            data.pop(key, None)
+        data.update(original)
         return body, hdrs
     return marked, hdrs

@@ -19,7 +19,7 @@ import json
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, metrics, provenance, proxy, streaming
+from . import auth, billing, budget, metrics, provenance, proxy, streaming
 
 
 # Terminal Responses events carrying final usage. `response.incomplete`
@@ -139,10 +139,13 @@ async def responses(f_req):
             await proxy.check_response(app, b_name, b_res,
                 request_id=f_req["request_id"])
 
-            if "text/event-stream" in b_res.headers.get("Content-Type", ""):
+            is_stream = "text/event-stream" in b_res.headers.get("Content-Type", "")
+            if is_stream:
                 usage_acc = _ResponsesStreamUsage()
-                f_res = await streaming.stream_through(f_req, b_res, usage_acc,
-                    extra_headers=provenance.headers(app["config"]))
+                f_res = await streaming.stream_through(f_req, b_res,
+                    budget.observer(f_req, usage_acc),
+                    extra_headers={**provenance.headers(app["config"]),
+                        **budget.headers(f_req, stream=True)})
                 usage = usage_acc.usage()
             else:
                 body = await b_res.content.read()
@@ -150,8 +153,7 @@ async def responses(f_req):
                 f_hdrs = {"Content-Type":
                     b_res.headers.get("Content-Type",
                         "application/octet-stream")}
-                body, p_hdrs = provenance.mark(app["config"], body, data,
-                    b_name, f_req["request_id"])
+                body, p_hdrs = budget.mark(f_req, body, data, b_name)
                 f_hdrs.update(p_hdrs)
                 f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
                 usage = data["usage"]
@@ -165,6 +167,7 @@ async def responses(f_req):
 
             metrics.observe_text_tokens(b_name,
                 billed["prompt_tokens"], billed["completion_tokens"])
+            budget.record(f_req, b_name, is_stream)
 
             return f_res
     except StatefulNotSupported as e:
