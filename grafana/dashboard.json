@@ -272,6 +272,36 @@
           "unit": "short"
         }
       }
+    },
+    {
+      "id": 14,
+      "title": "Output Budget: Truncation Rate",
+      "description": "Fraction of successful billed requests with observed truncation, for budget-enabled models. Cause is unknown; backend stop signals are in request logs.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(llmproxy_truncation_total[5m])) / sum by (model) (rate(llmproxy_budget_source_total[5m]))",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
+    },
+    {
+      "id": 15,
+      "title": "Output Budget: Reasoning Detail Availability",
+      "description": "Missing/invalid or inconsistent details must not be interpreted as zero reasoning. Inspect per-model coverage before calculating reasoning share.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (model, availability) (rate(llmproxy_reasoning_details_total[5m])) / on (model) group_left sum by (model) (rate(llmproxy_reasoning_details_total[5m]))",
+          "legendFormat": "{{model}} — {{availability}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
     }
   ]
 }

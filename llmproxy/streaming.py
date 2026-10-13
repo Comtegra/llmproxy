@@ -4,6 +4,8 @@ import json
 
 import aiohttp.web
 
+from .budget_headers import EXPOSE_HEADERS
+
 
 async def readuntil(stream, separator: bytes = b"\n") -> bytes:
     result = bytearray()
@@ -94,7 +96,7 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     f_res = aiohttp.web.StreamResponse(headers=headers)
 
     f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    f_res.headers["Access-Control-Expose-Headers"] = "X-Request-ID, X-AI-Generated"
+    f_res.headers["Access-Control-Expose-Headers"] = EXPOSE_HEADERS
     if o := app["config"].get("http_origin"):
         f_res.headers["Access-Control-Allow-Origin"] = o
 

@@ -32,6 +32,7 @@ def _validate_rate_limit(rl, prefix=""):
 
 
 def validate(cfg):
+    _validate_budget_options(cfg.get("budget", {}), "budget", global_options=True)
     for key in ("client_max_size", "max_json_body"):
         if key in cfg:
             value = cfg[key]
@@ -82,6 +83,75 @@ def validate(cfg):
 
         _validate_rate_limit(meta.get("rate_limit", {}),
             'Backend "%s" ' % name)
+        if "output_budget" in meta or "reasoning" in meta:
+            if meta["type"] != "chat":
+                raise ConfigError('Backend "%s" budgets require type chat' % name)
+            _validate_budget_options(meta.get("output_budget", {}),
+                'Backend "%s" output_budget' % name)
+            _validate_reasoning(meta.get("reasoning", {}), name)
+            policy = meta.get("output_budget", {})
+            if meta.get("reasoning", {}).get("native_budget") and "output_budget" not in meta:
+                raise ConfigError('Backend "%s" native reasoning budgets require output_budget' % name)
+            default, ceiling = policy.get("default_max_tokens"), policy.get("ceiling")
+            if default is not None and ceiling is not None and default > ceiling:
+                raise ConfigError('Backend "%s" default budget exceeds ceiling' % name)
+            if ceiling is not None and ceiling > meta.get("max_model_len", ceiling):
+                raise ConfigError('Backend "%s" ceiling exceeds max_model_len' % name)
+            reserve = meta.get("reasoning", {}).get("reserve_content_tokens")
+            if reserve is not None and default is not None and reserve >= default:
+                raise ConfigError('Backend "%s" reserve must be below default budget' % name)
+
+
+def _validate_budget_options(options, prefix, global_options=False):
+    if type(options) is not dict:
+        raise ConfigError("%s must be a table" % prefix)
+    flags = ("enabled", "echo_headers", "echo_body") if global_options else ("apply_default", "clamp")
+    numbers = () if global_options else ("default_max_tokens", "ceiling", "backend_default_max_tokens")
+    allowed = set(flags + numbers + (() if global_options else ("mode",)))
+    if set(options) - allowed:
+        raise ConfigError("%s contains unknown options: %s" %
+            (prefix, ", ".join(sorted(set(options) - allowed))))
+    for key in flags:
+        if key in options and type(options[key]) is not bool:
+            raise ConfigError("%s.%s must be a boolean" % (prefix, key))
+    for key in numbers:
+        if key in options and (type(options[key]) is not int or options[key] <= 0):
+            raise ConfigError("%s.%s must be a positive integer" % (prefix, key))
+    if not global_options:
+        if options.get("mode", "observe") not in ("observe", "enforce"):
+            raise ConfigError("%s.mode must be observe or enforce" % prefix)
+        for flag, required in (("apply_default", "default_max_tokens"), ("clamp", "ceiling")):
+            if options.get(flag) and required not in options:
+                raise ConfigError("%s.%s requires %s" % (prefix, flag, required))
+
+
+def _validate_reasoning(options, name):
+    prefix = 'Backend "%s" reasoning' % name
+    if type(options) is not dict:
+        raise ConfigError("%s must be a table" % prefix)
+    allowed = {"native_budget", "endpoints", "reserve_content_tokens", "effort_budgets", "default_effort"}
+    if set(options) - allowed:
+        raise ConfigError("%s contains unknown options" % prefix)
+    if "native_budget" in options and type(options["native_budget"]) is not bool:
+        raise ConfigError("%s.native_budget must be a boolean" % prefix)
+    endpoints = options.get("endpoints", ["chat"])
+    if (type(endpoints) is not list or not endpoints
+            or endpoints != ["chat"]):
+        raise ConfigError("%s.endpoints must be [chat]; native reasoning budgets "
+            "are not supported on Responses/Messages" % prefix)
+    reserve = options.get("reserve_content_tokens")
+    if reserve is not None and (type(reserve) is not int or reserve <= 0):
+        raise ConfigError("%s.reserve_content_tokens must be a positive integer" % prefix)
+    efforts = options.get("effort_budgets", {})
+    if type(efforts) is not dict:
+        raise ConfigError("%s.effort_budgets must be a table" % prefix)
+    for effort, value in efforts.items():
+        if (effort not in ("minimal", "low", "medium", "high", "xhigh")
+                or type(value) is not int or value <= 0):
+            raise ConfigError("%s.effort_budgets requires known efforts and positive integers" % prefix)
+    if "default_effort" in options and (type(options["default_effort"]) is not str
+            or options["default_effort"] not in efforts):
+        raise ConfigError("%s.default_effort requires a matching effort_budgets entry" % prefix)
 
 
 def load(path=None, create=False):

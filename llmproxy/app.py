@@ -12,7 +12,7 @@ import aiohttp.web
 import yarl
 
 from . import (
-    audio, auth, chat, config, embeddings, files, messages, metrics, ratelimit,
+    audio, auth, budget, chat, config, embeddings, files, messages, metrics, ratelimit,
     responses,
 )
 from .db import get_db, shutdown_all
@@ -74,7 +74,7 @@ async def add_cors_headers(req, handler):
             raise
         res = aiohttp.web.Response()
     res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    res.headers["Access-Control-Expose-Headers"] = "X-Request-ID, X-AI-Generated"
+    res.headers["Access-Control-Expose-Headers"] = budget.EXPOSE_HEADERS
     if o := req.app["config"].get("http_origin"):
         res.headers["Access-Control-Allow-Origin"] = o
     return res
@@ -127,11 +127,12 @@ def reload_config(app):
         app.logger.error("Failed reloading config: %s", e)
         return
 
-    # Only backends, rate limits, provenance and the auth cache settings are
+    # Only backends, rate limits, provenance, budgets and auth cache settings are
     # reloaded
     app["config"]["backends"] = cfg.get("backends", {})
     app["config"]["rate_limit"] = cfg.get("rate_limit", {})
     app["config"]["provenance"] = cfg.get("provenance", {})
+    app["config"]["budget"] = cfg.get("budget", {})
     app["config"]["auth_cache_ttl"] = cfg.get("auth_cache_ttl",
         auth.DEFAULT_CACHE_TTL)
 
@@ -173,6 +174,7 @@ async def create_app(cfg):
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.post("/v1/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
+        aiohttp.web.get("/v1/models/{id}", chat.model),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
         aiohttp.web.post("/v1/files/convert", files.convert),
@@ -192,12 +194,11 @@ async def create_app(cfg):
     # The metrics middleware bounds its `path` label to the routes we actually
     # serve; derive that set from the router (not a hand-maintained list) so a
     # newly added endpoint is instrumented automatically and can never drift out
-    # of the metric. Static resources only (skip any future dynamic "{var}"
-    # routes, whose full paths would be unbounded label cardinality).
+    # of the metric. The middleware uses resource.canonical for dynamic routes
+    # (e.g. /v1/models/{id}), never the unbounded client-supplied path.
     app["known_paths"] = frozenset(
         resource.canonical
         for resource in app.router.resources()
-        if "{" not in resource.canonical
     )
 
     app["config"] = cfg

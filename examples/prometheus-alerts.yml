@@ -11,6 +11,33 @@
 groups:
   - name: llmproxy
     rules:
+      # Budget counters cover successful billed requests on opt-in models.
+      # The volume gate avoids alerts on a handful of diagnostic/test requests.
+      - alert: LLMProxyOutputTruncationSpike
+        expr: |
+          (
+            sum by (model) (rate(llmproxy_truncation_total[5m]))
+              / sum by (model) (rate(llmproxy_budget_source_total[5m])) > 0.10
+          )
+          and on (model)
+          (sum by (model) (increase(llmproxy_budget_source_total[5m])) >= 20)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Output truncation exceeds 10% for {{ $labels.model }}"
+          description: "Inspect budget logs and backend stop reasons before changing output or reasoning limits."
+
+      - alert: LLMProxyInconsistentReasoningUsage
+        expr: |
+          sum by (model) (increase(llmproxy_reasoning_details_total{availability="inconsistent"}[5m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend reasoning usage contradicts output for {{ $labels.model }}"
+          description: "The backend reported zero reasoning tokens alongside reasoning text; the proxy leaves the partition unknown. Check the backend version and parser."
+
       # -------------------------------------------------------------------
       # High request volume
       # -------------------------------------------------------------------

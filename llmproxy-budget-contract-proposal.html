@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmproxy — widoczny budżet outputu: propozycja zmian architektonicznych (rozszerzenie budget.v1)</title>
+<style>
+/*
+ * Comtegra — styl PDF/HTML dla dokumentów renderowanych z Markdown.
+ *
+ * Używany przez:
+ *  - skill "comtegra-md-render" (render.py) — .md -> .pdf / .html z konsoli,
+ *  - rozszerzenie "Markdown PDF" (yzane) w Cursor / VS Code
+ *    (podpinany przez ustawienie markdown-pdf.styles w .vscode/settings.json).
+ *
+ * Kolor marki ustawiony jest w jednym miejscu poniżej (--comtegra-orange).
+ * Jeśli dokładny pomarańczowy Comtegry jest inny — zmień tylko tę wartość.
+ *
+ * Rozmiary w pt (jednostka druku) — PDF ma stały wygląd niezależnie od DPI.
+ * Style okładki i łamanie stron per-rozdział działają TYLKO w dokumentach,
+ * które zaczynają się od <div class="cover-mark"> (deliverables); zwykłe
+ * notatki renderują się jako ciągły dokument.
+ */
+
+:root {
+  --comtegra-orange: #eb7b16; /* główny pomarańczowy marki (do potwierdzenia) */
+  --comtegra-orange-dark: #c9660e; /* ciemniejszy wariant do tekstu/nagłówków */
+  --comtegra-orange-tint: #fff4ea; /* bardzo jasny pomarańczowy do tła */
+  --comtegra-text: #21262c; /* podstawowy kolor tekstu */
+  --comtegra-gray: #6d675f; /* tekst drugorzędny */
+  --comtegra-border: #e2dbd1; /* delikatne obramowania tabel/kodu */
+  --comtegra-bg-soft: #faf7f2; /* ciepłe tło bloków kodu */
+}
+
+/* ---------------------------------------------------------
+ * Typografia bazowa
+ * --------------------------------------------------------- */
+
+body {
+  color: var(--comtegra-text);
+  font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.55;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+p {
+  margin: 0.4em 0 0.85em;
+}
+
+ul,
+ol {
+  margin: 0.4em 0 0.9em;
+  padding-left: 1.5em;
+}
+li {
+  margin: 0.22em 0;
+}
+li > ul,
+li > ol {
+  margin: 0.2em 0 0.3em;
+}
+
+/* ---------------------------------------------------------
+ * Nagłówki — wyraźna hierarchia rozmiarów
+ * --------------------------------------------------------- */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+  font-weight: bold;
+  line-height: 1.25;
+  page-break-after: avoid;
+}
+
+/* h1 poza okładką = tytuł notatki: duży, przy lewej, akcent marki */
+h1 {
+  font-size: 19pt;
+  color: var(--comtegra-orange-dark);
+  border-bottom: 2.5px solid var(--comtegra-orange);
+  padding-bottom: 0.25em;
+  margin: 0 0 0.8em;
+}
+
+h2 {
+  font-size: 14.5pt;
+  color: var(--comtegra-text);
+  border-bottom: 1px solid var(--comtegra-orange);
+  padding-bottom: 0.2em;
+  margin: 1.6em 0 0.6em;
+}
+
+h3 {
+  font-size: 12pt;
+  color: var(--comtegra-orange-dark);
+  margin: 1.3em 0 0.45em;
+}
+
+h4 {
+  font-size: 10.5pt;
+  color: var(--comtegra-text);
+  margin: 1.1em 0 0.35em;
+}
+
+h5,
+h6 {
+  font-size: 10.5pt;
+  color: var(--comtegra-gray);
+  margin: 1em 0 0.3em;
+}
+
+/* ---------------------------------------------------------
+ * Cytat / blok "Uwaga" w kolorach Comtegry
+ * --------------------------------------------------------- */
+
+blockquote {
+  border-left: 3px solid var(--comtegra-orange);
+  background-color: var(--comtegra-orange-tint);
+  color: var(--comtegra-text);
+  padding: 0.65em 1em;
+  margin: 1em 0;
+  page-break-inside: avoid;
+}
+blockquote > :first-child {
+  margin-top: 0;
+}
+blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------------------------------------------------------
+ * Linki
+ * --------------------------------------------------------- */
+
+a {
+  color: var(--comtegra-orange-dark);
+  text-decoration: none;
+}
+
+/* ---------------------------------------------------------
+ * Tabele
+ * --------------------------------------------------------- */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 9.5pt;
+  line-height: 1.45;
+  margin: 0.8em 0 1.1em;
+}
+/* Długa tabela może przełamać stronę, ale nagłówek się powtarza,
+   a pojedynczy wiersz nie jest cięty w poprzek. */
+thead {
+  display: table-header-group;
+}
+tr {
+  page-break-inside: avoid;
+}
+table th {
+  background-color: var(--comtegra-orange);
+  color: #ffffff;
+  border: 1px solid var(--comtegra-orange);
+  text-align: left;
+  padding: 0.4em 0.65em;
+  font-weight: bold;
+}
+table td {
+  border: 1px solid var(--comtegra-border);
+  padding: 0.4em 0.65em;
+  vertical-align: top;
+}
+table tr:nth-child(2n) td {
+  background-color: #faf6f0;
+}
+/* Tabele z celowo pustym nagłówkiem (np. "Informacje o dokumencie")
+   nie pokazują pustego pomarańczowego paska. */
+table th:empty {
+  display: none;
+}
+
+/* ---------------------------------------------------------
+ * Kod
+ * --------------------------------------------------------- */
+
+code {
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8em;
+  background-color: #f4f0e9;
+  color: #4a4238;
+  padding: 0.08em 0.3em;
+  border-radius: 3px;
+}
+
+pre {
+  background-color: var(--comtegra-bg-soft);
+  border: 1px solid var(--comtegra-border);
+  border-radius: 4px;
+  padding: 0.8em 1em;
+  margin: 0.8em 0 1.1em;
+  line-height: 1.5;
+  page-break-inside: avoid;
+  /* W PDF nie ma przewijania — długie linie muszą się zawijać. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+pre code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  font-size: 8.5pt;
+}
+
+/* Podświetlanie składni (pygments, style inline) — kontener .codehilite
+   przejmuje ramowanie/tło bloku kodu, wewnętrzne `pre` jest gołe,
+   a długie linie zawijają się jak w zwykłym `pre` wyżej. */
+.codehilite {
+  background-color: var(--comtegra-bg-soft);
+  border: 1px solid var(--comtegra-border);
+  border-radius: 4px;
+  padding: 0.8em 1em;
+  margin: 0.8em 0 1.1em;
+  line-height: 1.5;
+  page-break-inside: avoid;
+}
+.codehilite pre {
+  margin: 0;
+  border: none;
+  padding: 0;
+  background-color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------
+ * Spis treści ([TOC])
+ * --------------------------------------------------------- */
+
+.toc {
+  border: 1px solid var(--comtegra-border);
+  background-color: var(--comtegra-orange-tint);
+  padding: 0.6em 1.2em 0.8em;
+  margin: 0 0 1.2em;
+  border-radius: 4px;
+}
+.toc .toctitle {
+  font-weight: bold;
+  font-size: 12pt;
+  color: var(--comtegra-orange-dark);
+  margin: 0.2em 0 0.5em;
+}
+.toc ul {
+  margin: 0;
+  padding-left: 1.3em;
+}
+.toc a {
+  color: var(--comtegra-text);
+}
+
+/* ---------------------------------------------------------
+ * Elementy różne
+ * --------------------------------------------------------- */
+
+hr {
+  border: none;
+  border-top: 1px solid var(--comtegra-border);
+  margin: 1.6em 0;
+}
+
+img {
+  max-width: 100%;
+}
+/* Zrzuty ekranu: wyśrodkowane, z delikatną ramką */
+img:not(.cover-logo) {
+  display: block;
+  margin: 0.9em auto;
+  border: 1px solid var(--comtegra-border);
+  border-radius: 3px;
+}
+
+/* =========================================================
+ * OKŁADKA I UKŁAD STRON — tylko dokumenty z okładką
+ * (deliverables zaczynające się od <div class="cover-mark">)
+ * - strona 1: okładka (tytuł "#" + podtytuł)
+ * - każdy nagłówek "##" zaczyna nową stronę
+ * ========================================================= */
+
+.cover-mark {
+  width: 64px;
+  height: 64px;
+  background-color: var(--comtegra-orange);
+  margin: 0 0 1.1cm 0;
+}
+.cover-logo {
+  display: block;
+  width: 200px;
+  height: auto;
+  margin: 0;
+}
+
+/* Tytuł na okładce: wyśrodkowany, zepchnięty ku środkowi strony */
+.cover-mark ~ h1 {
+  text-align: center;
+  font-size: 22pt;
+  margin-top: 4.5cm;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* Podtytuł okładki: <p class="cover-subtitle">Przygotowane przez Comtegra S.A.</p> */
+.cover-subtitle {
+  text-align: center;
+  font-size: 12pt;
+  color: var(--comtegra-gray);
+  margin-top: 1em;
+}
+.cover-subtitle::before {
+  content: "";
+  display: block;
+  width: 90px;
+  border-top: 2.5px solid var(--comtegra-orange);
+  margin: 0 auto 1em;
+}
+
+/* Każdy "##" od nowej strony (m.in. Spis treści i kolejne rozdziały) */
+.cover-mark ~ h2 {
+  page-break-before: always;
+  break-before: page;
+  margin-top: 0;
+}
+
+</style>
+</head>
+<body>
+<div class="cover-mark"></div>
+<h1 id="llmproxy-widoczny-budzet-outputu-propozycja-zmian-architektonicznych-rozszerzenie-budgetv1">llmproxy — widoczny budżet outputu: propozycja zmian architektonicznych (rozszerzenie budget.v1)</h1>
+<p class="cover-subtitle">Przygotowane przez Comtegra S.A.</p>
+<p>Status: PROPOZYCJA architektury (bez kodu, bez PR). Adresat: Comtegra/llmproxy @450d6cf. Snippety JSON/TOML/HTTP są ilustracyjne.</p>
+<h2 id="1-streszczenie-wykonawcze">1. Streszczenie wykonawcze</h2>
+<p><strong>Problem w 3 zdaniach.</strong> llmproxy — brama CGC do modeli LLM — działa dziś jako czysty pass-through: nie ustala, nie pokazuje ani nie kontroluje limitu tokenów generowanego outputu. Klient (harness agentowy: opencode, Codex, pi, dowolny skrypt curl) nie wie z góry, ile tokenów odpowiedzi dostanie, a w modelach reasoning tokeny „myślenia" po cichu zjadają ten sam budżet co treść. W produkcji (llm.comtegra.cloud) kosztowało to 5 utraconych generacji po ~6 minut każda: odpowiedź kończyła się dokładnie na 32 000 tokenów (31 996 myślenia + 4 treści), treść finalna była pusta, a harness uznał ją za awarię.</p>
+<p><strong>Proponowane zmiany:</strong>
+- <strong>Katalog z budżetem ex ante</strong> — <code>/v1/models</code> (i nowy <code>GET /v1/models/{id}</code>) pokazują dla każdego modelu domyślny budżet outputu, sufit (ceiling) i informacje o reasoning; harness widzi limity, zanim wyśle request.
+- <strong>Jawnie stosowany budżet z echo</strong> — gdy klient nie poda <code>max_tokens</code>, proxy wpisuje skonfigurowany default; wartości nadmierne są klampowane do ceiling (nigdy 400); każda odpowiedź niesie nagłówki i obiekt body z zastosowanym budżetem i jego źródłem.
+- <strong>Diagnostyka ucięcia</strong> — odpowiedź z <code>finish_reason=length</code> dostaje (non-streaming) podział reasoning vs content + przyczynę; w streamingu wyłącznie standardowe kanały i metryki (strumień bajt w bajt nienaruszony).
+- <strong>Sterowanie myśleniem parametrami standardowymi</strong> — <code>reasoning_effort</code> / <code>reasoning.effort</code> / <code>thinking.budget_tokens</code> mapowane per-backend na parametry vLLM, z rezerwacją tokenów na treść.
+- <strong>Konfiguracja per-backend + kill switch</strong> — <code>[backends.&lt;id&gt;.output_budget]</code> w config.toml, przeładowanie SIGHUP; brak konfiguracji = zachowanie bajt w bajt jak dziś.
+- <strong>Obserwowalność</strong> — metryki Prometheus (truncation, reasoning share, budget source) i opt-inowe rozliczanie reasoning osobno; billing domyślnie nietknięty.</p>
+<p><strong>Oczekiwany efekt.</strong> Koniec „magicznego 32 000": każdy klient bez żadnej zmiany po swojej stronie dostaje pełną informację ex ante (katalog), in-flight (echo) i ex post (diagnostyka); operatorzy zyskują kontrolę i pomiar; epizody „pusta treść po 6 minutach" stają się widoczne, objaśnione i konfigurowalnie zapobiegalne.</p>
+<h2 id="2-problem-niewidzialny-budzet-outputu">2. Problem — niewidzialny budżet outputu</h2>
+<h3 id="empiria-z-produkcji-llmcomtegracloud-backend-reasoning-glm-53">Empiria z produkcji (llm.comtegra.cloud, backend reasoning glm-53)</h3>
+<p>5 utraconych generacji o identycznej sygnaturze: reasoning+content = <strong>dokładnie 32 000 tokenów</strong> (np. 31 996 myślenia + 4 treści), <code>finish_reason=length</code>, ~6 minut generacji, treść finalna <strong>pusta</strong>. Harness dostaje „nic" po 6 minutach pracy agenta i traktuje to jako awarię — bo nic mu nie mówi, że budżet zjadło myślenie. Tokeny myślenia są przy tym rozliczane jak zwykły completion, więc faktura jest pełna, a wartość zerowa.</p>
+<h3 id="koszt-problemu-ujecie-ilosciowe">Koszt problemu (ujęcie ilościowe)</h3>
+<ul>
+<li><strong>Czas</strong>: 5 udokumentowanych generacji × ~6 min = ~30 minut pracy agenta zmarnowanej na odpowiedzi bez treści; każda taka tura to też opóźnienie całego zadania użytkownika (agent czeka, potem diagnozuje „awarię").</li>
+<li><strong>Pieniądze</strong>: tokeny myślenia rozliczone jako completion (eventy prompt/completion w <code>billing.events_oneoff</code>) — pełna faktura za odpowiedź o zerowej wartości merytorycznej.</li>
+<li><strong>Niewiarygodność</strong>: harness kwalifikuje odpowiedź jako awarię techniczną (retry, eskalacja do człowieka), choć była to poprawna, tylko ucięta generacja — sygnał <code>finish_reason=length</code> bez podziału nie pozwala odróżnić „model się wysypał" od „myślenie zjadło budżet".</li>
+<li><strong>Niewidzialność operacyjna</strong>: dziś nie da się zapytać „jak często to się zdarza i czemu" — brak metryki truncation, brak podziału reasoning/content, brak korelacji budżetu z requestem.</li>
+</ul>
+<h3 id="dlaczego-rozwiazanie-musi-byc-w-proxy">Dlaczego rozwiązanie musi być w proxy</h3>
+<p>Użytkownik nie kontroluje harnessów (opencode, Codex, pi, curl — różne protokoły, SDK i defaulty klientów). Jedyny wspólny mianownik wszystkich klientów to <strong>HTTP/JSON w protokołach OpenAI-compat / OpenAI-Responses-compat / Anthropic-compat</strong>. Zatem informacja i kontrola muszą płynąć z llmproxy — wtedy wszyscy dostają je naraz, bez aktualizacji po swojej stronie.</p>
+<h3 id="fakt-1-proxy-nie-rusza-max_tokens-pass-through">Fakt 1 — proxy nie rusza <code>max_tokens</code> (pass-through)</h3>
+<p>llmproxy przesyła body bez zmian; jedyna mutacja requestu to <code>force_include_usage</code> dopisująca <code>stream_options.include_usage</code> (chat.py) — cicha, nieecho'owana. Nikt więc nie ustala, nie klampuje ani nie komunikuje budżetu outputu.</p>
+<h3 id="fakt-2-budzet-niewidoczny-ex-ante">Fakt 2 — budżet niewidoczny ex ante</h3>
+<p><code>/v1/models</code> wystawia dziś <code>type</code>, <code>device</code>, <code>model_repo</code>, <code>max_model_len</code> (chat.py) — a <code>max_model_len</code> to limit KONTEKSTU (prompt+completion), nie outputu. Nie ma <code>GET /v1/models/{id}</code> (404; routing w app.py ma tylko listę). Klient nie może odróżnić kontekstu od budżetu, a źródło limitu (default harnessu? backendu vLLM?) jest nieznane.</p>
+<h3 id="fakt-3-reasoning-zjada-budzet-po-cichu">Fakt 3 — reasoning zjada budżet po cichu</h3>
+<p>Jedyny sygnał to standardowy <code>finish_reason=length</code> — bez podziału reasoning vs content. <code>usage.completion_tokens_details.reasoning_tokens</code> przechodzi w pass-through „przypadkiem": zależy od wersji vLLM (piny w config.toml: &gt;=0.13.0 minimum dla /v1/messages, &gt;=0.21.0 rekomendowane dla /v1/responses, 0.24.0 zweryfikowane) i nie jest gwarantowany kontraktowo.</p>
+<h3 id="fakt-4-sterowanie-mysleniem-nie-dociera">Fakt 4 — sterowanie myśleniem nie dociera</h3>
+<p>OpenAI-compat nie ma standardowego parametru budżetu myślenia; <code>reasoning_effort</code> wysłany w body ginie po cichu (vLLM/pydantic ignorują nieznane pola), a anthropicowy <code>thinking</code> nie dociera do chat template. Dziś nie da się standardowym parametrem sterować myśleniem przez proxy.</p>
+<h3 id="hipoteza-32-000-do-rozstrzygniecia-empirycznie-faza-0">Hipoteza 32 000 — do rozstrzygnięcia empirycznie (faza 0)</h3>
+<p>Skąd dokładnie bierze się magiczne 32 000: default klienta (harnessu), default serwera vLLM, czy pozostałość kontekstu? Nie jest to rozstrzygnięte na poziomie repo — propozycja <strong>nie zgaduje</strong>: katalog jawnie eksponuje <code>default_source</code>, a faza 0 (PoC) ma to zmierzyć. Do czasu rozstrzygnięcia uczciwość &gt; fantazja o kontroli.</p>
+<p><strong>Wniosek.</strong> Trzy objawy (niewidoczny ex ante, nieecho'owany in-flight, niezdiagnozowany ex post) mają jedną przyczynę: budżet outputu nie istnieje w proxy jako byt pierwszej klasy. Niniejszy dokument proponuje to zmienić — addytywnie, bez breaking changes i bez wymagań wobec harnessów.</p>
+<h2 id="3-zasady-projektowe">3. Zasady projektowe</h2>
+<ol>
+<li><strong>Harness-agnostic.</strong> Jedyna asumpcja o kliencie: mówi HTTP+JSON w jednym z obsługiwanych protokołów. Wszystkie informacje eksponujemy na kanałach, które klient dostaje „za darmo": katalog modeli, nagłówki HTTP, standardowe pola response. Test każdego elementu: „czy curl dostaje to samo?". Zero wymagań „najpierw zaktualizuj swojego klienta".</li>
+<li><strong>Additive-only.</strong> Nic nie usuwamy, nie zmieniamy semantyki ani kształtu pól standardowych (<code>max_tokens</code>, <code>finish_reason</code>, <code>usage</code> nietknięte); nowe dane tylko dodajemy. Precedens w repo: <code>provenance</code>, <code>model_repo</code>, <code>type</code>, <code>max_model_len</code> — wszystko dodane obok istniejącej struktury.</li>
+<li><strong>Zgodność ze wzorcem rozszerzeń repo (provenance).</strong> Każde rozszerzenie response = (a) obiekt w body non-streaming + (b) nagłówek ZAWSZE, także na SSE (nagłówki strumienia idą przez <code>stream_through(extra_headers=...)</code>, znane przed pierwszą ramką — streaming.py); (c) kill switch w config; (d) reload SIGHUP; (e) poszerzenie <code>Access-Control-Expose-Headers</code> w OBU miejscach (middleware app.py i streaming.py — dziś hardcoded <code>X-Request-ID, X-AI-Generated</code>); (f) udokumentowana tolerancja SDK (README: <code>completion.model_extra["provenance"]</code>); (g) fallback: awaria serializacji → oryginalne bajty + same nagłówki („a billable 200 never becomes an unbilled 500").</li>
+<li><strong>Streaming byte-for-byte święty.</strong> Ciało SSE nigdy nie dostaje syntetycznych eventów ani przepisanego terminal chunka (provenance.py: „injecting synthetic events breaks strict SDK stream parsers"; terminal chunk siedzi w billing moat — <code>drain</code>). Nowa informacja w streamingu = wyłącznie nagłówki ustawiane PRZED pierwszą ramką + telemetria post-factum.</li>
+<li><strong>Determinizm.</strong> Polityka budżetu = czysta funkcja (config, request) → (request', metadane). Zero heurystyk per-request, zero zależności decyzji od wersji vLLM; echo jest jedyną prawdą o tym, co dostał backend.</li>
+<li><strong>Degradowalność.</strong> Kill switch globalny + per-funkcja (<code>echo_headers</code>, <code>apply_default</code> per backend); wyłączenie = pełny powrót do dzisiejszego pass-through, bez restartu. Awaria parsowania usage → brak diagnostyki, odpowiedź przechodzi nienaruszona.</li>
+<li><strong>Wersjonowane rozszerzenie / feature detection.</strong> <code>X-LLMProxy-Extensions: budget.v1</code> (lista rozszerzalna, przecinkami) — statyczne wykrycie możliwości bez probowania i bez parsowania wersji proxy; wersjonowanie per-feature (semver-lite), nigdy per-API.</li>
+<li><strong>Źródło prawdy = config operatora per-backend.</strong> Jak <code>max_model_len</code> („should match the backend deployment setting") — proxy NIGDY nie odpytuje backendu o limity w locie i nie wylicza budżetu z limitu kontekstu.</li>
+<li><strong>No silent policy.</strong> Każda mutacja requestu ma echo w odpowiedzi (dziś <code>force_include_usage</code> jest ciche — ten brak propozycja naprawia). Skoro proxy decyduje o wstrzyknięciu/klampie, proxy to komunikuje.</li>
+<li><strong>Billing moat nienaruszony.</strong> Nic nie może przerwać <code>drain</code> ani zwiększyć ryzyka unbilled 200/500; wszystkie nowe pola są nadwyżkowe względem billing record (billing.events_oneoff).</li>
+</ol>
+<h3 id="co-jawnie-nie-robimy">Co jawnie NIE robimy</h3>
+<ul>
+<li><strong>Auto-continuation / auto-retry</strong> — proxy nie dogenerowuje uciętych odpowiedzi: decyzja o kontynuacji należy do harnessu, proxy daje komplet danych (uzasadnienie w §8).</li>
+<li><strong>Wstrzykiwanie eventów SSE / przepisywanie terminal chunka</strong> — udokumentowany antywzorzec repo (provenance.py, streaming.py).</li>
+<li><strong>Niestandardowa wartość <code>finish_reason</code></strong> (np. <code>budget_exhausted</code>) — łamie słownik OpenAI; sygnał niestandardowy wisi OBOK standardu (obiekt <code>llmproxy</code>), nigdy w nim.</li>
+<li><strong>SDK/pluginy per harness</strong> — eksplozja zakresu (N harnessów × M języków); wspólny mianownik HTTP+JSON obsługuje wszystkich naraz.</li>
+<li><strong>Autorskie parametry requestu</strong> (np. <code>x_llmproxy_budget</code>) — nie-compat, zależne od tolerancji SDK; sterowanie wyłącznie istniejącymi parametrami standardowymi.</li>
+<li><strong>Twarde 400 przy przekroczonym <code>max_tokens</code></strong> — zawsze clamp+echo; nowy tryb odmowy zamieniłby działające dziś requesty w awarie (dokładnie to, co leczymy).</li>
+<li><strong>Zmiana cen/semantyki billing bez zgody</strong> — split reasoning jest opt-in; domyślnie łańcuch billing nietknięty.</li>
+<li><strong>Naprawa Bad Gateway pod obciążeniem</strong> — odrębna sfera (admission control; istnieje per-model <code>rate_limit</code>); tylko odnotowujemy interakcję w §8.</li>
+</ul>
+<h2 id="4-zmiany-per-paszczyzna">4. Zmiany per płaszczyzna</h2>
+<p>Rozszerzenie dotyka sześciu płaszczyzn: katalog (ex ante), request (in-flight), response (ex post), config (źródło prawdy), billing/obserwowalność (pomiar) oraz kontrakt (gwarancje). Każda jest niezależnie wyłączalna; wszystkie dane pochodzą z jednego źródła (config per-backend) i kończą w istniejących kanałach (katalog, nagłówki, standardowe pola, metryki, billing). Wpływ na 4 endpointy generatywne (<code>/v1/chat/completions</code>, <code>/v1/completions</code>, <code>/v1/messages</code>, <code>/v1/responses</code>), streaming i billing omawiamy per płaszczyzna.</p>
+<h3 id="4a-katalog-wzbogacenie-v1models-get-v1modelsid">4a. Katalog: wzbogacenie /v1/models + GET /v1/models/{id}</h3>
+<p><strong>Co się zmienia.</strong> Handler <code>models()</code> (chat.py) — dziś <code>id</code>, <code>object</code>, <code>created</code>, <code>owned_by</code>, <code>type</code>, <code>device</code>, <code>model_repo</code>, <code>max_model_len</code> — dokłada do każdego backendu typu <code>chat</code> klaster <code>output_budget</code>, tablicę <code>extensions</code> oraz płaski alias:</p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>{
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"id"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"glm-53"</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"object"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"model"</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"type"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"chat"</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"device"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"h200"</span>,
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"model_repo"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"zai-org/GLM-53"</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"max_model_len"</span>:<span style="color: #BBB"> </span><span style="color: #666">131072</span>,
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"max_output_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #666">32000</span>,
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"extensions"</span>:<span style="color: #BBB"> </span>[<span style="color: #BA2121">"budget.v1"</span>],
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"output_budget"</span>:<span style="color: #BBB"> </span>{
+<span style="color: #BBB">    </span><span style="color: #008000; font-weight: bold">"default_max_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #666">32000</span>,
+<span style="color: #BBB">    </span><span style="color: #008000; font-weight: bold">"max_output_tokens_ceiling"</span>:<span style="color: #BBB"> </span><span style="color: #666">131072</span>,
+<span style="color: #BBB">    </span><span style="color: #008000; font-weight: bold">"default_source"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"backend"</span>,
+<span style="color: #BBB">    </span><span style="color: #008000; font-weight: bold">"reasoning"</span>:<span style="color: #BBB"> </span>{
+<span style="color: #BBB">      </span><span style="color: #008000; font-weight: bold">"enabled"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span>,
+<span style="color: #BBB">      </span><span style="color: #008000; font-weight: bold">"param"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"thinking_budget"</span>,
+<span style="color: #BBB">      </span><span style="color: #008000; font-weight: bold">"budget_control"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"chat_template_kwargs"</span>,
+<span style="color: #BBB">      </span><span style="color: #008000; font-weight: bold">"default_effort"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">null</span>
+<span style="color: #BBB">    </span>}
+<span style="color: #BBB">  </span>}
+}
+</code></pre></div>
+
+<p><strong>Semantyka pól.</strong>
+- <code>default_max_tokens</code> — budżet, który ZOSTANIE zastosowany, gdy klient nie poda własnego (ex ante jawny; kończy asymetrię „kontekst znany, budżet nieznany"); <code>null</code> = nic nie zostanie wstrzyknięte.
+- <code>max_output_tokens_ceiling</code> — hard cap proxy (klamp, §4b); <code>max_model_len</code> pozostaje kontekstem (prompt+completion) — budżet ≠ kontekst.
+- <code>default_source</code> — kto ustala limit, gdy <code>apply_default=false</code>: <code>backend</code> | <code>client_default</code> | <code>proxy</code> (uczciwość zamiast fantazji o kontroli; rozstrzygnięte empirycznie w fazie 0).
+- <code>reasoning.enabled/param/budget_control</code> — czy model generuje tokeny myślenia i jakim „dialektem" się go steruje (§4b); <code>default_effort</code> — opcjonalny default.
+- Płaski alias <code>max_output_tokens</code> = <code>default_max_tokens</code> — harness, który umie czytać standardowe pole, czyta nasz katalog bez nauki nowego słownictwa.</p>
+<p><strong>Skąd dane.</strong> Wyłącznie z configu per-backend (§4d) — nigdy z odpytywania backendu w locie (determinizm, zero nowego failure mode; vLLM nie wystawia limitów przez API). Precedens: <code>max_model_len</code> („should match the backend deployment setting").</p>
+<p><strong>Nowa trasa <code>GET /v1/models/{id}</code></strong> (app.py, obok listy <code>/v1/models</code>): 200 → pojedynczy item identyczny z listą; 404 → istniejący kształt <code>code: model_not_found</code>; autoryzacja jak dla listy (katalog nie jest publiczny). Konsekwencja dla metryk: trasa dynamiczna <code>{var}</code> jest dziś ŚCIEŻOWO wykluczana z <code>known_paths</code> (obawa przed unbounded label cardinality, app.py) — middleware musi kanonizować ścieżkę do wzorca zasobu (<code>/v1/models/{id}</code> jako etykieta), co ogranicza kardynalność do stałego zbioru tras.</p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>GET /v1/models/glm-53        (Authorization: Bearer &lt;token&gt;)
+HTTP/1.1 200 OK
+{"id": "glm-53", "object": "model", ..., "max_output_tokens": 32000,
+ "extensions": ["budget.v1"], "output_budget": {...}}
+
+GET /v1/models/no-such-model
+HTTP/1.1 404 Not Found
+{"error": {"code": "model_not_found", ...}}    # kształt zgodny z istniejącymi 404
+</code></pre></div>
+
+<p><strong>Relacja do standardów i rynku.</strong> OpenAI (2025) deprecjonuje <code>max_tokens</code> na rzecz <code>max_completion_tokens</code> (chat) / <code>max_output_tokens</code> (Responses) i eksponuje limity outputu w katalogu — nasz alias czytają istniejący klienci bez zmian. OpenRouter potwierdza wzorzec „limits w katalogu modeli" (per-model limity w listingach; nie kopiujemy kształtu 1:1). Katalog Anthropic (<code>/v1/models</code> ma id/display_name) — nasze pola czysto additive.</p>
+<p><strong>Wpływ.</strong> 4 endpointy generatywne: żaden (katalog czytany przed requestem lub wcale). Streaming: bez wpływu. Billing: bez wpływu. Katalog to metadata — bez oznaczeń provenance („metadata and errors are not synthetic content"). Ryzyko ≈ 0: nowe pola JSON w niegenerowanych odpowiedziach, tolerowane przez SDK jako <code>model_extra</code> (udokumentowany precedens).</p>
+<h3 id="4b-request-plane-polityka-budzetu-echo-sterowanie-reasoning">4b. Request plane: polityka budżetu + echo + sterowanie reasoning</h3>
+<p><strong>Hak architektoniczny już istnieje.</strong> Pass-through <code>proxy.request(f_req, transform, ...)</code> przyjmuje transform body PRZED forwardem (dziś: <code>force_include_usage</code>, chat.py). Polityka budżetu wchodzi tym samym mechanizmem — jako wywołanie nowego modułu <code>budget.py</code> z handlerów chat/messages/responses (jak <code>force_include_usage</code>, NIE globalne middleware — wymaga configu per-backend). Zero zmian w <code>proxy.py</code>, zero w ścieżce streamingu.</p>
+<p><strong>Polityka budżetu — deterministyczna funkcja (config, request):</strong></p>
+<ol>
+<li><strong>Klient podał budżet</strong> (param wg protokołu: <code>max_tokens</code>/<code>max_completion_tokens</code> w chat; <code>max_tokens</code> w legacy completions; <code>max_output_tokens</code> w Responses; wymagane <code>max_tokens</code> w Anthropic):
+   - <code>value ≤ ceiling</code> → forward bez zmian, <code>source="client"</code>;
+   - <code>value &gt; ceiling</code> → <strong>clamp do ceiling</strong> (zawsze; nigdy 400 — §3) + <code>clamped=true</code>.</li>
+<li><strong>Klient nie podał budżetu</strong>: <code>apply_default=true</code> → proxy wstrzykuje <code>default_max_tokens</code> pod prawidłową nazwą parametru danego protokołu, <code>source="proxy"</code>; <code>apply_default=false</code> → status quo passthrough (katalog i tak eksponuje <code>default_source</code>). Uwaga Anthropic: tam <code>max_tokens</code> jest REQUIRED — <code>apply_default</code> ratuje głównie protokoły OpenAI, gdzie pominięcie parametru tworzy niewidzialny default.</li>
+<li><strong>Konflikt parametrów</strong>: klient wyśle i <code>max_tokens</code>, i <code>max_completion_tokens</code> → pierwszeństwo <code>max_completion_tokens</code> (reguła OpenAI), udokumentowane w kontrakcie (§4f).</li>
+</ol>
+<p><strong>Echo — zasada no silent policy.</strong> Każda odpowiedź (non-streaming i SSE) niesie nagłówki: <code>X-LLMProxy-Max-Output-Tokens: 32000</code> i <code>X-LLMProxy-Budget-Source: client|proxy</code>; non-streaming dodatkowo obiekt body (§4c). Wartości są znane PRZED forwardem — dlatego echo jest w 100% bezpieczne także dla streamingu (nagłówki przez <code>stream_through(extra_headers=...)</code>, ustawiane przed pierwszą ramką). Klient po jednym requeście wie dokładnie: ile miał, kto ustawił, czy klampowano — koniec „nieznane źródło 32 000".</p>
+<p><strong>Ilustracja przepływu (HTTP):</strong></p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code># (1) klient NIE podał max_tokens (backend z apply_default=true)
+POST /v1/chat/completions
+{"model": "glm-53", "messages": [...]}
+→ do backendu trafia: {"model": "glm-53", "messages": [...], "max_tokens": 32000}
+
+HTTP/1.1 200 OK
+X-LLMProxy-Extensions: budget.v1
+X-LLMProxy-Max-Output-Tokens: 32000
+X-LLMProxy-Budget-Source: proxy
+{"choices": [...], "usage": {...},
+ "llmproxy": {"version": 1,
+              "budget": {"applied_max_output_tokens": 32000, "source": "proxy", "clamped": false}}}
+
+# (2) klient podał max_tokens=999999 &gt; ceiling → clamp, nie 400
+POST /v1/chat/completions
+{"model": "glm-53", "messages": [...], "max_tokens": 999999}
+→ do backendu trafia: {..., "max_tokens": 131072}
+X-LLMProxy-Max-Output-Tokens: 131072
+X-LLMProxy-Budget-Source: client
+{"llmproxy": {"version": 1,
+              "budget": {"applied_max_output_tokens": 131072, "source": "client",
+                         "clamped": true, "requested_max_output_tokens": 999999}}}
+</code></pre></div>
+
+<p><strong>Sterowanie reasoning — translacja dialektów, nie autorskie parametry.</strong> Sterujemy WYŁĄCZNIE parametrami standardowymi danego protokołu:
+- chat: <code>reasoning_effort</code> (standard OpenAI o-series),
+- Responses: <code>reasoning: {"effort": "..."}</code>,
+- Anthropic: <code>thinking: {"type": "enabled", "budget_tokens": N}</code>.</p>
+<p>Config per-backend definiuje mapowanie na „dialekt" backendu, np. vLLM: <code>[backends.X.reasoning] mapping = { thinking_budget = "chat_template_kwargs.thinking_budget" }</code> (nazwy kluczy zależne od chat template modelu, np. <code>thinking_budget</code>, <code>enable_thinking</code>). Do tego <code>reserve_content_tokens = N</code> → <code>thinking_budget = max(0, applied_budget − reserve)</code>: myślenie nie zje całości budżetu. Analiza pass-through: vLLM (pydantic) po cichu IGNORUJE nieznane pola — <code>reasoning_effort</code> dziś ginie bez śladu, a <code>thinking</code> nie dociera do template'u; translacja w proxy jest więc jedynym miejscem, gdzie standardowy parametr realnie steruje backendem. Gdy mapping nie jest skonfigurowany → parametr przechodzi nietknięty (dzisiejsze zachowanie, degradowalność).</p>
+<p><strong>Konsekwencje.</strong>
+- 4 endpointy generatywne: wspólna logika w <code>budget.py</code>, rozjazdy tylko w nazwach parametrów i kształtach usage u źródła.
+- Streaming: transform działa na body PRZED otwarciem streamu — <code>drain</code>/byte-for-byte nietknięte.
+- Billing: mechanizm bez zmian (usage z odpowiedzi); nowa metryka <code>budget_source</code> (§4e).
+- Metryki: <code>source</code> i <code>clamped</code> znane przed forwardem → liczone raz, konsekwentnie dla obu trybów.</p>
+<h3 id="4c-response-plane-gwarancja-usage-diagnostyka-truncation">4c. Response plane: gwarancja usage + diagnostyka truncation</h3>
+<p><strong>Gwarancja passthrough <code>reasoning_tokens</code> — kontrakt, nie szansa.</strong> Dziś <code>usage.completion_tokens_details.reasoning_tokens</code> przechodzi „przypadkiem" (zależnie od wersji vLLM; odpowiedniki: <code>output_tokens_details</code> w Responses/Anthropic). Propozycja podnosi to do kontraktu:
+- akumulatory usage (chat: <code>_ChatStreamUsage</code>; messages/responses: ich parse'ery SSE) eksponują details jako daną pierwszej klasy;
+- obecność pola monitorowana metryką <code>llmproxy_usage_details_missing_total</code> — zniknięcie po zmianie vLLM to alert, nie niespodzianka;
+- pole nieobecne (starszy vLLM / inny backend) → <code>details_available: false</code>, pola podziału <code>null</code> — <strong>nigdy nie zgadujemy</strong> podziału reasoning/content (determinizm).</p>
+<p><strong>Diagnostyka truncation — non-streaming (wzorzec provenance).</strong> Response 4 endpointów generatywnych dostaje (dodawane mechanizmem <code>provenance.mark</code>, z tym samym Decimal-safe fallbackiem: awaria serializacji → oryginalne bajty + same nagłówki) JEDEN top-level obiekt:</p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">"llmproxy"</span>:<span style="color: #BBB"> </span>{
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"version"</span>:<span style="color: #BBB"> </span><span style="color: #666">1</span>,
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"budget"</span>:<span style="color: #BBB"> </span>{<span style="color: #008000; font-weight: bold">"applied_max_output_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #666">32000</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"source"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"proxy"</span>,
+<span style="color: #BBB">             </span><span style="color: #008000; font-weight: bold">"clamped"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">false</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"requested_max_output_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">null</span>},
+<span style="color: #BBB">  </span><span style="color: #008000; font-weight: bold">"truncation"</span>:<span style="color: #BBB"> </span>{<span style="color: #008000; font-weight: bold">"occurred"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"reason"</span>:<span style="color: #BBB"> </span><span style="color: #BA2121">"output_budget"</span>,
+<span style="color: #BBB">                 </span><span style="color: #008000; font-weight: bold">"reasoning_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #666">31996</span>,<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">"content_tokens"</span>:<span style="color: #BBB"> </span><span style="color: #666">4</span>,
+<span style="color: #BBB">                 </span><span style="color: #008000; font-weight: bold">"details_available"</span>:<span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span>}
+}
+</code></pre></div>
+
+<ul>
+<li><strong>Trigger per protokół</strong>: <code>finish_reason=length</code> (chat/completions), <code>stop_reason=max_tokens</code> (Anthropic messages), <code>status=incomplete</code> + <code>incomplete_details.reason=max_output_tokens</code> (Responses) — ekstraktor per-protokół, symetryczny do istniejących akumulatorów usage.</li>
+<li><strong>Przyczyna</strong>: <code>output_budget</code> (completion ≈ zastosowany budżet) vs <code>context_window</code> (prompt+completion ≈ <code>max_model_len</code>) vs <code>null</code> (nie ucięte); bez usage → <code>details_available: false</code> + <code>reason: "unknown"</code>.</li>
+<li><strong>Podział</strong>: <code>reasoning_tokens</code> z usage; <code>content_tokens = completion − reasoning</code>; niezmiennik <code>reasoning + content == completion_tokens</code>.</li>
+<li><strong>Koszt</strong>: JEDNA wspólna re-serializacja (provenance + obiekt <code>llmproxy</code> w jednym przebiegu dumps) — nie dwa przebiegi.</li>
+</ul>
+<p><strong>Nagłówki — zawsze, także SSE.</strong>
+- <code>X-LLMProxy-Max-Output-Tokens</code> / <code>X-LLMProxy-Budget-Source</code> — wartości znane przed forwardem: realne w obu trybach.
+- <code>X-LLMProxy-Truncation: none|output_budget|context_window|unknown</code> — non-streaming: wartość zgodna z body; <strong>SSE: wartość <code>pending</code></strong> (prawda przychodzi w terminal chunku — bez lookaheadu nie znamy jej przy flushie nagłówków). Ostateczna diagnostyka streamingu ląduje w metrykach i logu z <code>request_id</code> (korelacja z billing, jak dziś); wartość <code>pending</code> sygnalizuje: „rozszerzenie aktywne, prawda w telemetrii — bez syntetycznych eventów".
+- <code>X-LLMProxy-Extensions: budget.v1</code> — feature detection (§4f).</p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code># non-streaming (finish_reason=length, podział znany ex post)
+X-LLMProxy-Extensions: budget.v1
+X-LLMProxy-Max-Output-Tokens: 32000
+X-LLMProxy-Budget-Source: proxy
+X-LLMProxy-Truncation: output_budget
+
+# SSE (wartości budżetu znane przed forwardem; truncation dopiero w terminal chunku)
+X-LLMProxy-Extensions: budget.v1
+X-LLMProxy-Max-Output-Tokens: 32000
+X-LLMProxy-Budget-Source: proxy
+X-LLMProxy-Truncation: pending        # prawda: terminal chunk + metryki + log (request_id)
+</code></pre></div>
+
+<p><strong>Streaming — co wolno, a czego NIE (twarde zasady z repo).</strong>
+- <strong>Wolno</strong>: (1) nagłówki z góry (przed pierwszą ramką, przez <code>stream_through</code>); (2) diagnostyka post-factum (metryki + log z <code>request_id</code>); (3) poleganie na finalnym usage-chunku, który proxy już dziś WYMUSZA (<code>force_include_usage</code>) — tam siedzi <code>completion_tokens_details</code>, więc harness czytający standardowy strumień dostaje podział bez naszej ingerencji.
+- <strong>NIE wolno</strong>: wstrzykiwać eventów SSE (provenance.py: „injecting synthetic events breaks strict SDK stream parsers"); przepisywać terminal chunka (siedzi w billing moat — <code>drain</code> karmi akumulatory verbatim); zmieniać <code>finish_reason</code> na wartość niestandardową; dodawać nagłówków po prepare (aiohttp je ignoruje — komentarz w streaming.py).
+- Ewentualna przyszła wersja v2 (stream-body marking) należy do WRITE-side między <code>on_chunk</code> a <code>write_block</code> (miejsce wskazane w provenance.py) — świadomie POZA tą propozycją.</p>
+<p><strong>Konsekwencje per endpoint.</strong> chat/completions: pełny obiekt diagnostyki, oba tryby. Legacy <code>/v1/completions</code>: często bez <code>completion_tokens_details</code> → <code>details_available: false</code>; echo budżetu działa. <code>/v1/messages</code>, <code>/v1/responses</code>: różne kształty usage u źródła (input/output_tokens), diagnostyka normalizowana do jednego kształtu wyjściowego; piny vLLM &gt;=0.13.0/0.21.0 gwarantują kształt usage.</p>
+<h3 id="4d-config-plane-schema-per-backend-sighup-kill-switch">4d. Config plane: schema per-backend, SIGHUP, kill switch</h3>
+<p><strong>Schema (rozszerzenie <code>[backends.&lt;id&gt;]</code>, wzorem <code>max_model_len</code>/<code>timeout</code>/<code>rate_limit</code>):</strong></p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #3D7B7B; font-style: italic"># Globalny kill switch rozszerzenia (SIGHUP-reloadable; false = pełny powrót</span>
+<span style="color: #3D7B7B; font-style: italic"># do pass-through, nawet gdy sekcje per-backend istnieją — wzorzec [provenance])</span>
+<span style="color: #008000; font-weight: bold">[budget]</span>
+enabled<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span>
+echo_headers<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span><span style="color: #BBB">   </span><span style="color: #3D7B7B; font-style: italic"># osobny switch nagłówków (minimalna degradacja przy strict-parserze)</span>
+
+<span style="color: #008000; font-weight: bold">[backends.glm-53]</span>
+<span style="color: #3D7B7B; font-style: italic"># ...istniejące pola bez zmian (url, token, device, type, model, max_model_len, timeout...)</span>
+
+<span style="color: #008000; font-weight: bold">[backends.glm-53.output_budget]</span>
+default_max_tokens<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #666">32000</span><span style="color: #BBB">  </span><span style="color: #3D7B7B; font-style: italic"># wstrzykiwany, gdy klient nie poda (i apply_default=true)</span>
+ceiling<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #666">131072</span><span style="color: #BBB">            </span><span style="color: #3D7B7B; font-style: italic"># hard cap proxy: klamp (zawsze; nigdy 400)</span>
+apply_default<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #008000; font-weight: bold">true</span><span style="color: #BBB">        </span><span style="color: #3D7B7B; font-style: italic"># opt-in per backend: czy proxy wstrzykuje default</span>
+default_source<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #BA2121">"backend"</span><span style="color: #BBB">  </span><span style="color: #3D7B7B; font-style: italic"># informacja do katalogu, gdy apply_default=false</span>
+
+<span style="color: #008000; font-weight: bold">[backends.glm-53.reasoning]</span>
+mapping<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span>{<span style="color: #BBB"> </span>thinking_budget<span style="color: #BBB"> </span>=<span style="color: #BBB"> </span><span style="color: #BA2121">"chat_template_kwargs.thinking_budget"</span><span style="color: #BBB"> </span>}<span style="color: #BBB">  </span><span style="color: #3D7B7B; font-style: italic"># dialekt mapowania</span>
+reserve_content_tokens<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="color: #666">2000</span><span style="color: #BBB">  </span><span style="color: #3D7B7B; font-style: italic"># thinking_budget = max(0, applied - reserve)</span>
+default_effort<span style="color: #BBB"> </span><span style="color: #666">=</span><span style="color: #BBB"> </span><span style="border: 1px solid #F00">null          # opcjonalny default reasoning</span><span style="color: #666">_</span>effort<span style="border: 1px solid #F00">/</span>thinking
+</code></pre></div>
+
+<p><strong>Zasady.</strong>
+- <strong>Jedno źródło prawdy</strong>: te same wartości zasilają katalog (§4a), politykę (§4b) i echo (§4c) — operator ustawia raz, harness widzi wszędzie to samo (determinizm).
+- <strong>Semantyka absent/null</strong>: sekcja <code>output_budget</code> nieobecna ⇒ zachowanie identyczne z dziś (passthrough, zero mutacji requestu). Istniejące configi działają bez zmian — additive-only na poziomie deployu.
+- <strong>Walidacja przy starcie</strong> (rozszerzenie config.validate; precedens „refuses to start while any backend lacks a valid type"): <code>default_max_tokens ≤ ceiling ≤ max_model_len</code>, <code>reserve_content_tokens &lt; default_max_tokens</code>, spójność <code>default_source</code>. Błąd wewnętrznej sprzeczności → ConfigError; sama NIEOBECNOŚĆ sekcji nie jest błędem.
+- <strong>Reload SIGHUP</strong>: per-backend tabele jadą razem z <code>backends</code>; KLUCZOWE: dodać <code>[budget]</code> do kluczy przeładowywanych przez <code>reload_config</code> (dziś: backends, rate_limit, provenance, auth_cache_ttl) — kill switch bez restartu (wzorzec <code>[provenance] enabled=false → SIGHUP</code>). Błędny reload → zachowana poprzednia wartość + log (dzisiejsze zachowanie reload_config).
+- <strong>Ortogonalność do timeout</strong>: istniejący wpis <code>timeout = 300</code> dla modeli reasoning (inaczej stream 504 i tur nierozliczona) pozostaje niezależny — budżet = ILE tokenów, timeout = JAK DŁUGO.
+- <strong>Czysto per-backend, bez globalnych defaultów budżetu</strong> — różne modele mają radykalnie różne limity; zero sekretów i zero zależności między backendami.
+- <strong>Operator zmienia budżety bez restartu</strong> — strojenie reasoning będzie iteracyjne (produkcja glm-53).</p>
+<p><strong>Wpływ.</strong> config.py: nowe klucze + walidacja krzyżowa; app.py: <code>reload_config</code> += <code>budget</code>; bez zmian semantyki istniejących sekcji. Streaming/billing bez wpływu bez opt-in.</p>
+<h3 id="4e-billing-i-obserwowalnosc">4e. Billing i obserwowalność</h3>
+<p><strong>Billing — domyślnie nietknięty.</strong> Stan dziś: 2 eventy na request (prompt + completion) do <code>billing.events_oneoff</code>, product = <code>MODEL/DEVICE/prompt|completion</code>; tokeny myślenia liczą się JAKO completion — klient płaci za myślenie, nie wiedząc, że w ogóle za nie płaci (usage nie pokazuje podziału, a treść może być pusta przy pełnej fakturze). Propozycja: cena, product-string, liczba eventów — bez zmian domyślnie.</p>
+<p><strong>Opt-in: rozliczanie reasoning osobno</strong> (per backend, <code>billing_split_reasoning = true</code>, faza 4):
+- event completion dzieli się na <code>completion</code> (sama treść) + nowy typ <code>reasoning</code> — <strong>suma niezmienna</strong>: reasoning + content == dawny completion (audytowalna tożsamość);
+- dopuszczalne TYLKO gdy <code>details_available: true</code> — bez details jeden event łączny jak dziś (determinizm rozliczeń, brak „czasem tak, czasem inaczej");
+- schema bazy bez zmian (events_oneoff: TYPE to dowolny string); zmiana product-string to decyzja biznesowa → bramka: zgoda właściciela łańcucha billing CGC;
+- opcjonalnie: additive flaga <code>truncated</code> w eventach billingowych (korelacja po istniejącym <code>request_id</code>).</p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code># default (billing_split_reasoning=false): 2 eventy — dokładnie jak dziś
+{request_id: "r1", product: "GLM-53/H200/completion", quantity: 32000}   # reasoning+content razem
+
+# opt-in (billing_split_reasoning=true, details_available=true): suma niezmienna
+{request_id: "r1", product: "GLM-53/H200/reasoning",  quantity: 31996}
+{request_id: "r1", product: "GLM-53/H200/completion", quantity: 4}      # 31996 + 4 == 32000
+</code></pre></div>
+
+<p><strong>Metryki Prometheus</strong> (rozszerzenie metrics.py, konwencja <code>llmproxy_*</code>, bounded cardinality — zbiór modeli × stałe enumy):</p>
+<table>
+<thead>
+<tr>
+<th>Metryka</th>
+<th>Typ</th>
+<th>Etykiety</th>
+<th>Odpowiada na pytanie</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>llmproxy_truncation_total</code></td>
+<td>counter</td>
+<td>model, reason (output_budget/context_window), stream, details_available</td>
+<td>ile i CZYM ucięte — problem z empirii jako liczba, nie anegdota</td>
+</tr>
+<tr>
+<td><code>llmproxy_reasoning_tokens_total</code></td>
+<td>counter</td>
+<td>model</td>
+<td>share = reasoning / <code>llmproxy_tokens_total{type=completion}</code> — udział myślenia</td>
+</tr>
+<tr>
+<td><code>llmproxy_budget_source_total</code></td>
+<td>counter</td>
+<td>model, source (client/proxy), clamped</td>
+<td>skuteczność polityki: ile requestów z jawnym defaultem, ile klamp; demaskuje „magiczne 32 000"</td>
+</tr>
+<tr>
+<td><code>llmproxy_usage_details_missing_total</code></td>
+<td>counter</td>
+<td>model</td>
+<td>czujnik regresji vLLM: zniknięcie <code>completion_tokens_details</code> = alert</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Te metryki są JEDYNYM domyślnym kanałem diagnostyki truncation dla STREAMINGU</strong> (w strumieniu nie wolno modyfikować ciała, §4c) — ich kompletność to wymóg, nie ozdobnik.</li>
+<li>Grafana: NOWY panel „Output budget: truncation rate / reasoning share" (istniejące 13 paneli bez zmian); alerty w stylu <code>examples/prometheus-alerts.yml</code> (np. TruncationSpike na <code>truncation_total{reason="output_budget"}</code>).</li>
+</ul>
+<p><strong>Wpływ.</strong> billing.py: jedna gałąź opt-in; metrics.py: 4 nowe serie; db/schema: bez zmian.</p>
+<h3 id="4f-kontrakt-rozszerzenia-i-dokumentacja">4f. Kontrakt rozszerzenia i dokumentacja</h3>
+<p><strong>Feature detection — <code>X-LLMProxy-Extensions</code>.</strong> Każda odpowiedź generatywna (non-streaming i SSE) oraz <code>/v1/models</code> niesie nagłówek <code>X-LLMProxy-Extensions: budget.v1</code> (lista rozszerzalna, przecinkami; <code>provenance</code> może się w przyszłości zarejestrować jako <code>provenance.v1</code>); katalog dodatkowo: tablica <code>extensions</code> w każdym itemie. Klient sprawdza raz — wie, czego może używać, bez probowania i bez parsowania wersji llmproxy.</p>
+<p><strong>Wersjonowanie treści.</strong> Obiekt body: <code>llmproxy.version: 1</code>. Polityka: w ramach v1 TYLKO dodanie pola; zmiana semantyki/kształtu = <code>budget.v2</code> w nagłówku i body (v1 pozostaje, dopóki ktoś jej używa) — zero silent breaking. Gdy <code>[budget] enabled=false</code> → nagłówka <code>budget.v1</code> i obiektu NIE MA (feature poprawnie znika z widoku klienta, nie „istnieje, ale kłamie").</p>
+<p><strong>Ilustracja: harness świadomy rozszerzenia (zero wymagane — czysty zysk dla nieświadomych):</strong></p>
+<div class="codehilite" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code># detekcja: jeden request, zero probowania
+budget_v1 = "budget.v1" in response.headers["X-LLMProxy-Extensions"].split(",")
+
+# adaptacja (przykład logiki harnessu):
+if budget_v1 and model_catalog["glm-53"].output_budget.reasoning.enabled:
+    max_tokens = int(response.headers["X-LLMProxy-Max-Output-Tokens"])
+    # ustal max_tokens z BUGŻETEM na treść zanim wyśle request:
+    #   reasoning_default = catalog.default_max_tokens - reserve_content_tokens
+if budget_v1 and body.get("llmproxy", {}).get("truncation", {}).get("occurred"):
+    # zamiast traktować pustą treść jako awarię → świadoma decyzja o kontynuacji
+    handle_budget_exhaustion(body["llmproxy"]["truncation"])   # np. kontynuacja lub retry z mniejszym reasoning
+</code></pre></div>
+
+<p><strong>Dokument „budget contract" w repo.</strong> Nowa sekcja README (symetrycznie do sekcji provenance) + skomentowany przykład w config.toml + plan in-repo w stylu <code>rate-limit-plan.md</code>. Zawartość normatywna:
+1. <strong>Definicje</strong>: budżet outputu ≠ kontekst (<code>max_model_len</code> pozostaje prompt+completion); źródła limitów i <code>default_source</code>.
+2. <strong>Cykl życia requestu</strong>: katalog (ex ante) → wstrzyknięcie/klamp (in-flight) → echo (ex post) → diagnostyka truncation.
+3. <strong>Tabele pól per endpoint</strong> (chat/completions/messages/responses) i per tryb (streaming/non-streaming).
+4. <strong>Inwarianty testowalne</strong>: (a) zastosowany budżet ZAWSZE w nagłówkach odpowiedzi; (b) pola standardowych protokołów nigdy niezmienione; (c) ciało SSE bajt w bajt identyczne z backendem; (d) brak <code>output_budget</code> w config = zachowanie sprzed zmiany; (e) <code>details_available:false</code> = brak zgadywania podziału; (f) kill switch = zero śladu rozszerzenia; (g) każda mutacja requestu ma echo.
+5. <strong>Zależności od wersji vLLM</strong> — tabela: co działa BEZ <code>completion_tokens_details</code> (katalog, echo, klamp, sterowanie, metryki source), co wymaga pinów (&gt;=0.13.0 messages, &gt;=0.21.0 responses, 0.24.0 verified) — spójnie z pin-block w config.toml.</p>
+<p><strong>Tabela kompatybilności — co dostaje KAŻDY klient bez żadnej zmiany po swojej stronie:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Klient</th>
+<th>Kanał</th>
+<th>Co widzi bez zmian u siebie</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>curl / skrypty</td>
+<td>wszystko</td>
+<td>pełny katalog + <code>GET /v1/models/{id}</code>, nagłówki echo, obiekt <code>llmproxy</code>, metryki — pełna inspekcja bez SDK</td>
+</tr>
+<tr>
+<td>opencode (OpenAI-compat)</td>
+<td>/v1/chat/completions</td>
+<td><code>max_output_tokens</code> w katalogu; echo w nagłówkach; w streamie <code>finish_reason=length</code> + usage-chunk z details; obiekt <code>llmproxy</code> (non-streaming) jako <code>model_extra</code></td>
+</tr>
+<tr>
+<td>Codex</td>
+<td>/v1/responses</td>
+<td>echo budżetu; standardowe <code>usage.output_tokens_details</code>; <code>status=incomplete</code> + <code>llmproxy.truncation</code>; <code>reasoning.effort</code> działa przez mapping</td>
+</tr>
+<tr>
+<td>pi / dowolny Anthropic-compat</td>
+<td>/v1/messages</td>
+<td><code>stop_reason=max_tokens</code> + <code>llmproxy.truncation</code>; <code>thinking.budget_tokens</code> mapowane na backend</td>
+</tr>
+<tr>
+<td>przeglądarka (CORS)</td>
+<td>—</td>
+<td>nowe nagłówki w <code>Access-Control-Expose-Headers</code> (app.py + streaming.py)</td>
+</tr>
+<tr>
+<td>oficjalne SDK (wszystkie języki)</td>
+<td>chat/completions</td>
+<td>tolerancja dodatkowych pól — udokumentowany precedens provenance</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Test tolerancji SDK z sekcji provenance zostaje rozszerzony o obiekt <code>llmproxy</code> (ta sama klasa ryzyka: top-level dodatkowe pole); strict-parser → <code>echo_headers=false</code> lub <code>[budget] enabled=false</code> + SIGHUP.</li>
+</ul>
+<h2 id="5-wpyw-na-moduy-llmproxy">5. Wpływ na moduły llmproxy</h2>
+<p><strong>Nowy moduł vs hak w istniejącym transformie.</strong> Cała logika rozszerzenia ląduje w NOWYM module <code>budget.py</code> (sibling <code>provenance.py</code> — ten sam wzorzec: stałe HEADER/FIELD, enabled(), headers(), build()); wejście do ścieżki requestu przez ISTNIEJĄCY hak <code>proxy.request(transform)</code> (precedens <code>force_include_usage</code>, chat.py) wywoływany z handlerów — nie globalne middleware (polityka wymaga configu per-backend). <code>proxy.py</code> bez zmian.</p>
+<table>
+<thead>
+<tr>
+<th>Moduł</th>
+<th>Zmiana</th>
+<th>Charakter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>budget.py</code> (NOWY)</td>
+<td>polityka (wstrzyknięcie/klamp), nagłówki echo, ekstraktory truncation per-protokół, obiekt body</td>
+<td>jedyny nowy moduł</td>
+</tr>
+<tr>
+<td><code>config.py</code></td>
+<td>klucze <code>[budget]</code>/<code>output_budget</code>/<code>reasoning</code> + walidacja krzyżowa</td>
+<td>rozszerzenie validate</td>
+</tr>
+<tr>
+<td><code>app.py</code></td>
+<td>trasa <code>GET /v1/models/{id}</code>; <code>reload_config</code> += <code>budget</code>; kanonizacja trasy dynamicznej w metrykach; lista expose w <code>add_cors_headers</code></td>
+<td>additive</td>
+</tr>
+<tr>
+<td><code>chat.py</code></td>
+<td><code>models()</code>: klaster <code>output_budget</code> + alias + <code>extensions</code>; <code>chat()</code>: kompozycja transformów, <code>extra_headers</code> na stream, wstrzyknięcie <code>llmproxy</code> (wspólny pass z provenance)</td>
+<td>punktowe</td>
+</tr>
+<tr>
+<td><code>messages.py</code>, <code>responses.py</code></td>
+<td>symetrycznie: echo + diagnostyka w istniejących akumulatorach usage</td>
+<td>analogiczne do chat.py</td>
+</tr>
+<tr>
+<td><code>streaming.py</code></td>
+<td>TYLKO lista expose/CORS w <code>stream_through</code> — <code>drain</code>/byte-for-byte NIETKNIĘTE</td>
+<td>jedno-wierszowe</td>
+</tr>
+<tr>
+<td><code>metrics.py</code></td>
+<td>4 liczniki (§4e) + kanonizacja path</td>
+<td>additive</td>
+</tr>
+<tr>
+<td><code>billing.py</code></td>
+<td>opt-in split <code>reasoning</code> (faza 4, OFF default)</td>
+<td>additive</td>
+</tr>
+<tr>
+<td><code>provenance.py</code></td>
+<td>bez zmian (ew. wydzielenie wspólnego bezpiecznego serializatora top-level — refaktor neutralny bajtowo)</td>
+<td>opcja</td>
+</tr>
+<tr>
+<td><code>proxy.py</code>, auth, db/schema, body-limit</td>
+<td>ZERO zmian</td>
+<td>—</td>
+</tr>
+<tr>
+<td>README.md, config.toml, docs</td>
+<td>sekcja „budget contract", tabela kompatybilności, pin-block PoC</td>
+<td>dokumentacja</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Nowe przepływy danych (3, wszystkie kończą się w istniejących kanałach):</strong>
+1. <strong>config → katalog</strong> (ex ante): <code>output_budget</code> → <code>/v1/models</code>, <code>/v1/models/{id}</code>.
+2. <strong>config + request → backend</strong> (in-flight): transform w <code>proxy.request</code> wstrzykuje/klampuje; wynik (<code>source</code>, <code>clamped</code>) → nagłówki (znane przed forwardem — bezpieczne także dla SSE) + obiekt body + metryki.
+3. <strong>backend response → diagnostyka</strong> (ex post): usage/finish_reason → ekstraktor → obiekt <code>llmproxy</code> (non-streaming), metryki, log z <code>request_id</code>, opcjonalna flaga billingowa.</p>
+<p><strong>Gwarancje nietykalności.</strong> Billing moat (<code>drain</code> po disconnect), byte-for-byte streamów, kształty pól standardowych, auth, rate-limit — poza zakresem modyfikacji. Najgorszy przypadek każdej płaszczyzny = powrót do dzisiejszego pass-through (kill switch + SIGHUP, bez restartu); rozszerzenie jest w 100% „obok" ścieżki krytycznej przychodu.</p>
+<h2 id="6-rollout">6. Rollout</h2>
+<p><strong>Faza 0 — PoC weryfikacyjny (zero zmian w proxy; twarda bramka).</strong> Przed JAKĄKOLWIEK implementacją — analogia do istniejącego pin-block („confirm the streaming usage shapes in a PoC before prod"). Do rozstrzygnięcia:
+1. <strong>Skąd dokładnie bierze się magiczne 32 000</strong> w deploymentach: jaki default stosuje vLLM, gdy klient nie poda parametru — default harnessu (hipoteza: klient), stała serwera, pozostałość kontekstu? Wtedy <code>default_source</code> w katalogu mówi prawdę, nie zgadywanki.
+2. <strong>Które wersje vLLM emitują <code>usage.completion_tokens_details.reasoning_tokens</code></strong> (non-streaming i finalny usage-chunk) w chat; odpowiedniki w /v1/messages i /v1/responses — determinuje <code>details_available</code>.
+3. <strong>Jak przejść <code>thinking_budget</code>/parametry reasoning przez pass-through</strong>: czy <code>reasoning_effort</code>/<code>thinking</code> dziś ginie po cichu (ignorowane pole vs błąd walidacji) — podstawa dialektów mapping.
+4. <strong>Które <code>chat_template_kwargs</code> realnie sterują budżetem myślenia glm-53</strong> (i drugi przypadek, np. Qwen3) — nazwy kluczy z chat template/tokenizer_config.
+5. <strong>Czy klamp <code>max_tokens</code> &gt; pozostały kontekst działa na backendzie</strong> (jak vLLM honoruje max_tokens przy wyczerpanym kontekście).
+6. <strong>Tolerancja nieznanych pól top-level</strong> w odpowiedziach przez oficjalne SDK (potwierdzenie precedensu dla obiektu <code>llmproxy</code>).</p>
+<p><strong>Metodologia PoC</strong>: pomiar odbywa się W OBU ŚCIERAŁOWO NIEZALEŻNYCH ŚCIEŻKACH — (a) curl bezpośrednio do backendu vLLM (bez proxy) i (b) curl przez llmproxy (pass-through); porównanie odpowiedzi usage/finish_reason rozstrzyga, co dodaje/niszczy proxy, a co backend. Źródłem prawdy o dialektach sterowania jest chat template/tokenizer_config konkretnego modelu (nazwy kluczy <code>chat_template_kwargs</code>), nie dokumentacja ogólna vLLM. Wyniki (wersja vLLM × zachowanie) trafiają do pin-block w config.toml w formie tabeli.</p>
+<p>Zależności wersyjne = piny vLLM z config.toml (target &gt;=0.13.0, rekomendowane &gt;=0.21.0, verified 0.24.0); wyniki PoC doklejane do pin-block (wzorzec istniejący).</p>
+<p><strong>Fazy wdrożeniowe</strong> (każda: osobny merge, SIGHUP-togglowalna, odwracalna kill switchem; promocja per-backend — najpierw glm-53, potem reszta):</p>
+<table>
+<thead>
+<tr>
+<th>Faza</th>
+<th>Zakres</th>
+<th>Kryterium przejścia</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. Katalog (zero-risk, ON by default)</td>
+<td><code>output_budget</code>+alias+<code>extensions</code> w /v1/models; <code>GET /v1/models/{id}</code>; kanonizacja metryk</td>
+<td>wyniki PoC 1–2 udokumentowane w repo; tydzień w produkcji bez alertów i zgłoszeń parserowych</td>
+</tr>
+<tr>
+<td>2. Widoczność (read-only, opt-in per backend)</td>
+<td>nagłówki echo + obiekt <code>llmproxy</code> + metryki truncation/reasoning; <code>apply_default=false</code> — nic się nie wstrzykuje, tylko eksponuje</td>
+<td>tydzień w produkcji: brak regresji truncation, brak strict-parser zgłoszeń; <code>usage_details_missing</code> w normie</td>
+</tr>
+<tr>
+<td>3. Polityka (opt-in)</td>
+<td><code>apply_default=true</code> (jawny default zamiast niewidzialnego) + klamp — glm-53, potem kolejne backendy</td>
+<td><code>budget_source_total{source="proxy"}</code> rośnie; <code>truncation_total{reason="output_budget"}</code> spada; tydzień bez alertów</td>
+</tr>
+<tr>
+<td>4. Reasoning + billing (opt-in)</td>
+<td>mapping dialektów + <code>reserve_content_tokens</code> + <code>default_effort</code>; <code>billing_split_reasoning</code> TYLKO po zgodzie właściciela łańcucha billing CGC</td>
+<td>potwierdzone wyniki PoC 3–4; akceptacja właściciela billing; monitorowany reasoning share</td>
+</tr>
+</tbody>
+</table>
+<p>Zasada bramkowania: faza N+1 nie startuje bez udokumentowanych wyników fazy N w repo (wzorzec: pin-block w config.toml) oraz tygodnia produkcji bez alertów truncation-regresji i zgłoszeń parserowych. Wszystkie fazy kompatybilne z pinami vLLM; nowe zależności wersyjne doklejane do tego samego pin-block.</p>
+<h2 id="7-kryteria-akceptacji-demonstrowalne-curl-em">7. Kryteria akceptacji (demonstrowalne curl-em)</h2>
+<p>Każde kryterium = asercja + weryfikacja (bearer <code>$TOKEN</code> z configu, model reasoning z empirii — bez żadnego specjalnego klienta). AC-5/6 wymagają backendu reasoning (vLLM &gt;=0.21.0 wg pinów); bez niego — AC-8.</p>
+<ul>
+<li><strong>AC-1 katalog ex ante</strong>:
+  <code>curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/v1/models \
+    | jq '.data[] | select(.id=="glm-53") | .output_budget'</code>
+  → obiekt z <code>default_max_tokens</code>, <code>max_output_tokens_ceiling</code>, <code>reasoning.enabled: true</code>; płaski alias <code>max_output_tokens</code> == default. Backend bez <code>output_budget</code> w configu → pól BRAK (nie null-y).</li>
+<li><strong>AC-2 pojedynczy model</strong>: <code>curl -s ... localhost:8080/v1/models/glm-53</code> → 200, item identyczny z listą; <code>curl -s ... /v1/models/no-such</code> → 404 <code>{"error":{"code":"model_not_found"}}</code> (kształt zgodny z istniejącymi 404).</li>
+<li><strong>AC-3 echo default</strong>:
+  <code>curl -si -H "Authorization: Bearer $TOKEN" \
+    -d '{"model":"glm-53","messages":[{"role":"user","content":"hi"}]}' \
+    localhost:8080/v1/chat/completions</code>
+  (BEZ <code>max_tokens</code>, backend z <code>apply_default=true</code>) → nagłówki <code>X-LLMProxy-Max-Output-Tokens: 32000</code>, <code>X-LLMProxy-Budget-Source: proxy</code>, <code>X-LLMProxy-Extensions: budget.v1</code>; body zawiera <code>llmproxy.budget.applied_max_output_tokens == 32000</code>.</li>
+<li><strong>AC-4 echo klienta i klamp</strong>: z <code>"max_tokens": 100</code> → <code>source=client</code>, 100; z <code>"max_tokens": 999999</code> → echo = ceiling, <code>llmproxy.budget.clamped: true</code>, <code>requested_max_output_tokens: 999999</code>, odpowiedź <strong>200</strong> (nigdy 400); <code>usage.completion_tokens &lt;= ceiling</code>.</li>
+<li><strong>AC-5 diagnostyka truncation</strong>: wymusić ucięcie (mały <code>default_max_tokens</code> w configu testowym, prompt wymagający myślenia) → <code>finish_reason: "length"</code> NIETYKANY + <code>llmproxy.truncation = {occurred: true, reason: "output_budget", reasoning_tokens: N, content_tokens: M, details_available: true}</code> z <code>N+M == usage.completion_tokens</code>; nagłówek <code>X-LLMProxy-Truncation</code> zgodny z body.</li>
+<li><strong>AC-6 degradacja</strong>: backend/stub bez <code>completion_tokens_details</code> → <code>details_available: false</code>, <code>reasoning_tokens: null</code>, <code>reason: "unknown"</code>, 200 OK, billing nadal 2 eventy.</li>
+<li><strong>AC-7 trzy protokoły</strong>: analogiczne echo + diagnostyka na <code>/v1/responses</code> (<code>status=incomplete</code> + <code>incomplete_details.reason=max_output_tokens</code>) i <code>/v1/messages</code> (<code>stop_reason=max_tokens</code>) — ten sam obiekt <code>llmproxy</code> non-streaming.</li>
+<li><strong>AC-8 streaming bez śladu w ciele</strong>:
+  <code>curl -sN -H "Authorization: Bearer $TOKEN" \
+    -d '{"model":"glm-53","messages":[...],"stream":true}' \
+    localhost:8080/v1/chat/completions</code>
+  → nagłówki echo i <code>X-LLMProxy-Truncation: pending</code> na starcie; <code>diff &lt;(stream przez proxy) &lt;(stream wprost z backendu)</code> → identyczne bajty; ZERO dodatkowych eventów SSE; finalny usage-chunk zawiera <code>completion_tokens_details</code>.</li>
+<li><strong>AC-9 metryki</strong>: <code>curl -s localhost:8080/metrics | grep -E 'truncation_total|budget_source_total'</code> → po AC-5 <code>llmproxy_truncation_total{reason="output_budget"}</code> wzrósł ≥1; po AC-3 <code>llmproxy_budget_source_total{source="proxy"}</code> wzrósł ≥1; <code>llmproxy_usage_details_missing_total</code> == 0 na pinowanych wersjach.</li>
+<li><strong>AC-10 billing domyślnie nietknięty</strong>: przy <code>billing_split_reasoning=false</code> (default) → 2 eventy (prompt, completion) pod tym samym <code>request_id</code> (z nagłówka <code>X-Request-ID</code>); <code>completion == reasoning+content</code>; product-string bez zmian.</li>
+<li><strong>AC-11 kill switch</strong>: <code>[budget] enabled=false</code> + SIGHUP → odpowiedzi generatywne bajtowo równoważne wersji bez rozszerzenia (brak nagłówków i obiektu <code>llmproxy</code>), katalog bez bloku <code>output_budget</code>, zero mutacji requestu — bez restartu.</li>
+<li><strong>AC-12 tolerancja SDK</strong>: openai-python parsuje odpowiedź z <code>llmproxy</code> bez wyjątków (<code>completion.model_extra["llmproxy"]</code>); strict-parser → kill switch (dokumentowane, jak przy provenance).</li>
+</ul>
+<h2 id="8-ryzyka-i-alternatywy-odrzucone">8. Ryzyka i alternatywy odrzucone</h2>
+<h3 id="ryzyka-z-mitygacjami">Ryzyka (z mitygacjami)</h3>
+<ul>
+<li><strong>R1 — Macierz wersji vLLM</strong>: źródło 32 000, wsparcie <code>reasoning_tokens</code> i parametrów reasoning różnią się per wersja. Mitygacja: faza 0 jako twarda bramka; <code>details_available</code> zamiast zgadywania; pin-block w config.toml rozszerzany o wyniki; metryka <code>usage_details_missing</code> jako czujnik regresji.</li>
+<li><strong>R2 — Dialekty sterowania myśleniem per model/template</strong> (glm-53 ≠ Qwen3 ≠ DeepSeek): mapping w configu per-backend, nie w kodzie — nowy model = wpis TOML, nie release. Bez mappingu = passthrough.</li>
+<li><strong>R3 — Koszt re-serializacji</strong> obiektu <code>llmproxy</code> (provenance już dziś „costs some CPU" przy logprobs): JEDNA wspólna serializacja (provenance + budget w jednym przebiegu), nie dwa.</li>
+<li><strong>R4 — Konflikt parametrów</strong> (<code>max_tokens</code> + <code>max_completion_tokens</code>): jawna reguła pierwszeństwa (<code>max_completion_tokens</code>), udokumentowana w kontrakcie.</li>
+<li><strong>R5 — Trasa dynamiczna vs metryki</strong>: <code>/v1/models/{id}</code> to pierwszy route <code>{var}</code> (dziś wykluczany z <code>known_paths</code>): kanonizacja do wzorca zasobu + test kardynalności.</li>
+<li><strong>R6 — Źródło 32 000 nierozstrzygnięte</strong>: jeśli PoC wykaże default serwera niedotykalny z proxy — katalog uczciwie eksponuje <code>default_source="backend"</code> z wartością zmierzoną; jawność zamiast fantazji o kontroli.</li>
+<li><strong>R7 — Strict parser po stronie harnessu</strong>: kill switch dwupoziomowy — <code>echo_headers=false</code> (znikają tylko nagłówki) → <code>[budget] enabled=false</code> (całość), oba SIGHUP bez restartu.</li>
+<li><strong>R8 — Zmiana product-string (billing_split_reasoning)</strong>: złamie cudze pipeline'y billingowe — OFF default, faza 4, bramka zgody właściciela łańcucha CGC.</li>
+<li><strong>R9 — Harness ignoruje nowości</strong>: wtedy pacjent nie korzysta z katalogu, ALE echo+truncation i tak trafiają w jego odpowiedź; dokument kontraktu = materiał zgłoszeń upstream (opencode/Codex).</li>
+</ul>
+<h3 id="alternatywy-odrzucone-i-dlaczego">Alternatywy odrzucone (i dlaczego)</h3>
+<ol>
+<li><strong>Auto-continuation / auto-retry w proxy</strong>: nie zna intencji klienta, dubluje koszt (billing!), psuje streamy, niedeterminizm; kontynuacja to decyzja harnessu — proxy daje czytelny sygnał.</li>
+<li><strong>Wstrzykiwanie eventów SSE / przepisywanie terminal chunka</strong>: łamie strict parsery (docstring provenance.py) i wchodzi w billing moat (<code>drain</code> karmi akumulatory verbatim).</li>
+<li><strong>Niestandardowy <code>finish_reason</code></strong> (np. <code>budget_exhausted</code>): łamie słownik OpenAI i switch-e w SDK; sygnał niestandardowy w OBIEKCIE <code>llmproxy</code> i metrykach, nie w polach standardowych.</li>
+<li><strong>Autorskie parametry requestu</strong> (<code>x_llmproxy_*</code>): nie-compat, zależne od tolerancji SDK; sterowanie przez istniejące parametry standardowe per protokół.</li>
+<li><strong>Katalog z live odpytywaniem backendów</strong>: nowy failure mode, latencja, niedeterminizm; prawda = config operatora (precedens <code>max_model_len</code>).</li>
+<li><strong>SDK/pluginy per harness</strong>: eksplozja zakresu (N harnessów × M języków); HTTP+JSON obsługuje wszystkich naraz.</li>
+<li><strong>Twarde 400 przy przekroczeniu ceiling</strong>: zamieniłoby działające dziś requesty w awarie — dokładnie to, co leczymy; zawsze clamp+echo.</li>
+<li><strong>Naprawa Bad Gateway pod obciążeniem</strong>: poza zakresem — to admission control (istnieje per-model <code>rate_limit</code> rpm/concurrency z flushem na SIGHUP); adresować osobnym planem.</li>
+</ol>
+<h2 id="9-zakonczenie">9. Zakończenie</h2>
+<p>Niniejszy dokument powstał jako scalenie dwóch niezależnych analiz architektonicznych wykonanych na klonie llmproxy @450d6cf, z adjudykacją obszar po obszarze i jednoznacznym rozstrzygnięciem rozbieżnich punktów; konwergencje obu analiz (wzorzec provenance jako kanwa, additive-only, byte-for-byte streaming) potraktowano jako potwierdzenie kierunku, a nie zwolnienie z weryfikacji. Empiria pochodzi z produkcji llm.comtegra.cloud (5 utraconych generacji, dokładnie 32 000 tokenów, <code>finish_reason=length</code>, ~6 minut każda); wszystkie fakty o repo zostały ugruntowane w kodzie llmproxy (chat.py, provenance.py, streaming.py, app.py, config.toml, README.md) i pozostają samodzielnie weryfikowalne. Faza 0 (PoC) ma rozstrzygnąć pozostałe pytania empiryczne — źródło „magicznego 32 000", wsparcie <code>reasoning_tokens</code> per wersja vLLM, przejście <code>thinking_budget</code> przez pass-through — zanim jakakolwiek linijka trafi do produkcji.</p>
+</body>
+</html>

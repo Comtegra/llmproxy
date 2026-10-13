@@ -8,7 +8,7 @@ import aiohttp
 import yarl
 from aiohttp import http_exceptions
 
-from . import errors, metrics, ratelimit
+from . import budget, errors, metrics, ratelimit
 
 
 CONTEXT_LENGTH_MARKERS = (
@@ -163,6 +163,13 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
 
     if body_transform is not None:
         body_transform(b_body)
+
+    # Apply after backend selection/model rewriting, using this request's
+    # backend config snapshot. A reload cannot change an in-flight policy.
+    try:
+        budget.prepare(f_req, b_cfg, b_body)
+    except budget.BudgetError as e:
+        raise _bad_request(f_req, str(e)) from e
 
     if f_req.content_type == "application/json":
         b_body = json.dumps(b_body)
