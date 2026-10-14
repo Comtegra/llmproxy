@@ -1,4 +1,5 @@
 import importlib.resources
+import math
 import os
 import sys
 import tomllib
@@ -11,7 +12,10 @@ class ConfigError(Exception):
 # Every backend must declare one of these as its ``type``. Each endpoint
 # handler passes the type it serves to proxy.request(), which rejects a model
 # of any other type before the request reaches the backend.
-BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion")
+BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion", "decision")
+
+DECISION_LIMITS = {"max_questions": 16, "max_branches": 64,
+    "max_response_bytes": 4 * 1024 * 1024}
 
 
 def _validate_rate_limit(rl, prefix=""):
@@ -67,6 +71,25 @@ def validate(cfg):
         if meta.get("type") not in BACKEND_TYPES:
             raise ConfigError('Backend "%s" type must be one of: %s' %
                 (name, ", ".join(BACKEND_TYPES)))
+
+        if meta["type"] == "decision":
+            for key in ("url", "model", "device"):
+                if type(meta.get(key)) is not str or not meta[key].strip():
+                    raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
+            if "token" in meta and type(meta["token"]) is not str:
+                raise ConfigError('Backend "%s" token must be a string' % name)
+            if "timeout" in meta and (type(meta["timeout"]) not in (int, float)
+                    or not math.isfinite(meta["timeout"]) or meta["timeout"] <= 0):
+                raise ConfigError('Backend "%s" timeout must be finite and positive' % name)
+        if "decision_limits" in meta:
+            limits = meta["decision_limits"]
+            if meta["type"] != "decision" or type(limits) is not dict:
+                raise ConfigError('Backend "%s" decision_limits requires a decision table' % name)
+            if set(limits) - set(DECISION_LIMITS):
+                raise ConfigError('Backend "%s" unknown decision_limits option' % name)
+            for key, value in limits.items():
+                if type(value) is not int or value <= 0:
+                    raise ConfigError('Backend "%s" decision_limits.%s must be a positive integer' % (name, key))
 
         if "max_model_len" in meta:
             value = meta["max_model_len"]

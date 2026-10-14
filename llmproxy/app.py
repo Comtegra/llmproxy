@@ -12,7 +12,7 @@ import aiohttp.web
 import yarl
 
 from . import (
-    audio, auth, budget, chat, config, embeddings, files, messages, metrics, ratelimit,
+    audio, auth, budget, chat, config, decisions, embeddings, files, messages, metrics, ratelimit,
     responses,
 )
 from .db import get_db, shutdown_all
@@ -171,6 +171,8 @@ async def create_app(cfg):
     # provenance.mark() on the non-streaming branch, provenance.headers() via
     # stream_through(extra_headers=...) on streams.
     routes = [
+        aiohttp.web.post("/v1/systemone", decisions.decide),
+        aiohttp.web.post("/v1/basal", decisions.decide),
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.post("/v1/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),
