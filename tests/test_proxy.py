@@ -1035,7 +1035,10 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
     def test_validate_accepts_every_backend_type(self):
         for backend_type in config.BACKEND_TYPES:
             with self.subTest(type=backend_type):
-                config.validate({"backends": {"m": {"type": backend_type}}})
+                meta = {"type": backend_type}
+                if backend_type == "decision":
+                    meta.update(url="https://example.org", model="basal", device="a5000")
+                config.validate({"backends": {"m": meta}})
 
     def test_validate_accepts_positive_integer_max_model_len(self):
         config.validate({"backends": {"mymodel": {"type": "chat",

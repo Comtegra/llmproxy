@@ -88,9 +88,14 @@ async def _read_body(f_req):
         if not _is_malformed_body(e):
             raise
         # Truncated: aiohttp's message can quote a whole line of the body.
-        f_req.app.logger.info(
-            "Malformed request body: request_id=%s error=%.200r at %s",
-            f_req["request_id"], e, _raised_at(e))
+        if f_req.path in ("/v1/systemone", "/v1/basal"):
+            f_req.app.logger.info(
+                "Malformed decision request: request_id=%s error_type=%s at %s",
+                f_req["request_id"], type(e).__name__, _raised_at(e))
+        else:
+            f_req.app.logger.info(
+                "Malformed request body: request_id=%s error=%.200r at %s",
+                f_req["request_id"], e, _raised_at(e))
         if multipart:
             message = "Malformed multipart/form-data body."
         elif isinstance(e, json.JSONDecodeError):
@@ -109,7 +114,7 @@ async def _read_body(f_req):
 # Backend related variables are prefixed with b_.
 @contextlib.asynccontextmanager
 async def request(f_req, body_transform=None, user=None, path=None, *,
-        backend_type):
+        backend_type, backend_body_transform=None):
     """Forward a client request to the backend selected by ``model``.
 
     ``backend_type`` is the backend type (config.BACKEND_TYPES) the calling
@@ -155,7 +160,9 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     # ``path`` lets a handler rewrite (e.g. /v1/files/convert -> api/v1/marker).
     b_path = path if path is not None else f_req.rel_url.path[1:]
     b_url = yarl.URL(b_cfg["url"]) / b_path
-    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
+    b_hdrs = {}
+    if backend_type != "decision" or b_cfg.get("token"):
+        b_hdrs["Authorization"] = "Bearer %s" % b_cfg["token"]
 
     b_body = f_body.copy()
     if (m := b_cfg.get("model")) is not None:
@@ -163,6 +170,10 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
 
     if body_transform is not None:
         body_transform(b_body)
+    # Opt-in callback with the selected config; existing one-argument
+    # transforms retain their interface and ordering.
+    if backend_body_transform is not None:
+        backend_body_transform(b_body, b_cfg)
 
     # Apply after backend selection/model rewriting, using this request's
     # backend config snapshot. A reload cannot change an in-flight policy.
@@ -239,7 +250,7 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
 
 
 async def check_response(app, b_name, b_res, expected_status=200,
-        request_id=None):
+        request_id=None, *, max_bytes=None, log_body=True):
     """Raise on backend responses that don't match the expected status.
 
     4xx errors are forwarded as-is (client errors from the backend).
@@ -249,13 +260,13 @@ async def check_response(app, b_name, b_res, expected_status=200,
     if b_res.status == expected_status:
         return
 
-    body = await b_res.read()
+    body = await read_limited(b_res, max_bytes) if max_bytes is not None else await b_res.read()
 
     app.logger.error(
         'Backend "%s" unexpected status: request_id=%s status=%d '
         'content_type=%s body_len=%d body_preview=%s',
         b_name, request_id, b_res.status, b_res.content_type, len(body),
-        body[:1024].decode("utf-8", errors="replace"))
+        body[:1024].decode("utf-8", errors="replace") if log_body else "[omitted]")
 
     if 400 <= b_res.status < 500:
         exc = aiohttp.web.HTTPBadRequest(content_type=b_res.content_type)
@@ -263,7 +274,7 @@ async def check_response(app, b_name, b_res, expected_status=200,
         exc.body = body
         raise exc
 
-    if b_res.status >= 500 and looks_like_context_length_error(body):
+    if log_body and b_res.status >= 500 and looks_like_context_length_error(body):
         raise aiohttp.web.HTTPUnprocessableEntity(
             text=json.dumps({
                 "error": {
@@ -276,3 +287,13 @@ async def check_response(app, b_name, b_res, expected_status=200,
         )
 
     raise aiohttp.web.HTTPBadGateway()
+
+
+async def read_limited(response, limit):
+    """Bound actual decoded bytes, including chunked/compressed responses."""
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(min(65536, limit + 1)):
+        if len(body) + len(chunk) > limit:
+            raise ValueError("response_too_large")
+        body.extend(chunk)
+    return bytes(body)
