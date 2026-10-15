@@ -256,7 +256,10 @@ def create_app():
     app = aiohttp.web.Application(client_max_size=2 * 1024 ** 3,
         middlewares=[record_path])
     app["paths"] = []
+    app["decision_calls"] = []
+    app["decision_control"] = {}
     app.add_routes([
+        aiohttp.web.post("/v1/systemone", decision),
         aiohttp.web.get("/health", health),
         aiohttp.web.post("/v1/chat/completions", chat),
         # The legacy route reuses the chat handler (chat-shaped body expected);
@@ -270,3 +273,32 @@ def create_app():
         aiohttp.web.post("/api/v1/marker", marker),
     ])
     return app
+
+
+async def decision(req):
+    body = await req.json()
+    req.app["decision_calls"].append((body, dict(req.headers)))
+    control = req.app["decision_control"]
+    if event := control.get("started"):
+        event.set()
+    if event := control.get("release"):
+        await event.wait()
+    await asyncio.sleep(control.get("delay", 0))
+    data = control.get("response", {
+        "model": "Remek/basal-2.0-max-GGUF",
+        "answers": {name: {"type": "choice", "choice": "yes",
+            "probabilities": {"yes": 0.9, "no": 0.1}, "confidence": 0.9}
+            for name in body["questions"]},
+        "usage": {"input_tokens": 880, "output_tokens": 0}})
+    raw = control.get("raw", json.dumps(data).encode())
+    content_type = control.get("content_type", "application/json")
+    status = control.get("status", 200)
+    if control.get("chunked"):
+        res = aiohttp.web.StreamResponse(status=status,
+            headers={"Content-Type": content_type})
+        await res.prepare(req)
+        for start in range(0, len(raw), 17):
+            await res.write(raw[start:start + 17])
+        await res.write_eof()
+        return res
+    return aiohttp.web.Response(body=raw, status=status, content_type=content_type)

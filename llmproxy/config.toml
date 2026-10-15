@@ -181,3 +181,23 @@ uri = "sqlite://db.sqlite"
 #health_path = "healthz"  # marker serves /healthz (not /health)
 
 # Add more backends here
+
+# Native Basal decisions (not Chat Completions). URL must not include /v1.
+# Limits below are proxy policy, per request / per user+model, not GPU limits.
+#[backends."basal-2.0-max"]
+#type = "decision"
+#url = "https://basal-20-max-q8.llm.cgc-krk-01.comtegra.cloud"
+#model = "Remek/basal-2.0-max-GGUF"
+#device = "a5000"
+#token = "mytoken3"
+#max_model_len = 32768  # engine context, shared by state and question template
+#verify_ssl = true
+#timeout = 300
+#health_path = "health"
+#[backends."basal-2.0-max".rate_limit]
+#rpm = 30
+#concurrency = 1  # per user+model in this process, not deployment-wide
+#[backends."basal-2.0-max".decision_limits]
+#max_questions = 16
+#max_branches = 64
+#max_response_bytes = 4194304
