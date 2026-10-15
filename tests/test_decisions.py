@@ -86,7 +86,7 @@ class TestDecisions(LLMProxyAppTestCase):
         app["config"]["backends"]["basal-2.0-max"] = {
             "url": str(self.backend.make_url("" )).rstrip("/"),
             "type": "decision", "model": "Remek/basal-2.0-max-GGUF",
-            "device": "a5000", "max_model_len": 32768}
+            "device": "a5000", "max_model_len": 32768, "timeout": 5}
         ratelimit.flush()
         return app
 
@@ -108,7 +108,7 @@ class TestDecisions(LLMProxyAppTestCase):
 
     async def test_aliases_forward_and_bill_once(self):
         self.app["config"]["budget"] = {"enabled": True}
-        for path in ("/v1/systemone", "/v1/basal"):
+        for path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
             body = payload()
             body["questions"].update({"q%d" % i: {"type": "choice"} for i in range(5)})
             res = await self.post(body, path)
@@ -118,8 +118,8 @@ class TestDecisions(LLMProxyAppTestCase):
             forwarded, headers = self.calls[-1]
             self.assertEqual(forwarded, {k: v for k, v in body.items() if k != "model"})
             self.assertNotIn("Authorization", headers)
-        self.assertEqual([x["quantity"] for x in await self.get_events()], [880, 0, 880, 0])
-        self.assertEqual(self.backend.app["paths"].count("/v1/systemone"), 2)
+        self.assertEqual([x["quantity"] for x in await self.get_events()], [880, 0, 880, 0, 880, 0])
+        self.assertEqual(self.backend.app["paths"].count("/v1/systemone"), 3)
 
     async def test_backend_token_and_catalog(self):
         self.backend_config["token"] = "upstream-secret"
@@ -128,7 +128,7 @@ class TestDecisions(LLMProxyAppTestCase):
         res = await self.client.get("/v1/models/basal-2.0-max", headers={"Authorization": "Bearer mytoken"})
         item = await res.json()
         self.assertEqual(item["type"], "decision")
-        self.assertEqual(item["endpoints"], ["/v1/systemone", "/v1/basal"])
+        self.assertEqual(item["endpoints"], ["/v1/systemone", "/v1/basal", "/v1/decisions"])
         self.assertNotIn("token", item)
         self.assertNotIn("url", item)
 
@@ -144,9 +144,10 @@ class TestDecisions(LLMProxyAppTestCase):
         body = payload()
         del body["state"]
         cases.append((body, "mytoken", 400))
-        for body, token, status in cases:
-            with self.subTest(body=body):
-                self.assertEqual((await self.post(body, token=token)).status, status)
+        for path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
+            for body, token, status in cases:
+                with self.subTest(path=path, body=body):
+                    self.assertEqual((await self.post(body, path=path, token=token)).status, status)
         res = await self.post(path="/v1/chat/completions")
         self.assertEqual(res.status, 404)
         self.assertEqual(self.calls, [])
@@ -228,6 +229,7 @@ class TestDecisions(LLMProxyAppTestCase):
         await self.insert_key("second-token", "second")
         self.assertEqual((await self.post()).status, 200)
         self.assertEqual((await self.post(path="/v1/basal")).status, 429)
+        self.assertEqual((await self.post(path="/v1/decisions")).status, 429)
         self.assertEqual((await self.post(token="second-token")).status, 200)
         self.assertEqual(len(self.calls), 2)
 
@@ -267,9 +269,18 @@ class TestDecisions(LLMProxyAppTestCase):
         self.assertEqual((await self.get_events())[0]["quantity"], 100000)
 
     async def test_native_types_and_tool_definitions_are_preserved(self):
-        from tests.test_e2e_basal import questions
-        body = payload() | {"questions": questions()}
-        body["questions"]["tool"]["multi"] = True
+        body = payload() | {"questions": {
+            "category": {"type": "choice", "criteria": {"refund": "Refund", "other": "Other"}},
+            "refund": {"type": "noul", "instructions": "Does the customer want a refund?"},
+            "urgency": {"type": "score", "levels": ["Low", "Medium", "High"]},
+            "labels": {"type": "multi", "criteria": {"damage": "Damaged product", "refund": "Refund requested"}},
+            "action": {"type": "act", "criteria": {"true": "Refund warranted", "false": "Refund not warranted"},
+                "costs": {"wrong": 10, "defer": 0.1}},
+            "tool": {"type": "tool", "multi": True, "tools": [{"type": "function",
+                "function": {"name": "refund_order", "description": "Refund a damaged order",
+                    "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}},
+                        "required": ["order_id"]}}}]},
+        }}
         answers = {
             "category": {"type": "choice", "choice": "refund", "confidence": 1,
                 "probabilities": {"refund": 1, "other": 0}},

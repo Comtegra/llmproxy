@@ -88,7 +88,7 @@ async def _read_body(f_req):
         if not _is_malformed_body(e):
             raise
         # Truncated: aiohttp's message can quote a whole line of the body.
-        if f_req.path in ("/v1/systemone", "/v1/basal"):
+        if f_req.path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
             f_req.app.logger.info(
                 "Malformed decision request: request_id=%s error_type=%s at %s",
                 f_req["request_id"], type(e).__name__, _raised_at(e))
