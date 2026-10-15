@@ -173,6 +173,7 @@ async def create_app(cfg):
     routes = [
         aiohttp.web.post("/v1/systemone", decisions.decide),
         aiohttp.web.post("/v1/basal", decisions.decide),
+        aiohttp.web.post("/v1/decisions", decisions.decide),
         aiohttp.web.post("/v1/chat/completions", chat.chat),
         aiohttp.web.post("/v1/completions", chat.chat),
         aiohttp.web.get("/v1/models", chat.models),

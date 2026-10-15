@@ -38,13 +38,15 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `embedding` | `/v1/embeddings` |
 | `transcription` | `/v1/audio/transcriptions` |
 | `conversion` | `/v1/files/convert` |
-| `decision` | `/v1/systemone`, `/v1/basal` |
+| `decision` | `/v1/systemone`, `/v1/basal`, `/v1/decisions` |
 
 Native Basal decisions use their own request/response schema and token usage,
 with the same client authentication and billing as the other endpoints.
 See [Basal configuration, examples and local E2E tests](docs/basal_decisions.md).
 The `decision` backend's `model` is catalog metadata; its routing alias is
 removed from the body forwarded to Basal.
+All three decision endpoints use the same handler and forward to the
+backend's `/v1/systemone` route.
 
 A request naming a model on an endpoint of another type (e.g. chat completions
 with an embedding model) is rejected with `404` and `code: model_not_supported`
