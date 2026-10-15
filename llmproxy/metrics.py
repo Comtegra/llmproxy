@@ -56,6 +56,13 @@ import prometheus_client.core
 # All metrics share the default global registry.
 _REGISTRY = prometheus_client.core.REGISTRY
 
+DECISION_ERRORS_TOTAL = prometheus_client.Counter(
+    "llmproxy_decision_errors_total", "Invalid decision backend responses", ["model", "reason"])
+DECISION_QUESTIONS_TOTAL = prometheus_client.Counter(
+    "llmproxy_decision_questions_total", "Successfully billed decision questions", ["model"])
+DECISION_BRANCHES_TOTAL = prometheus_client.Counter(
+    "llmproxy_decision_branches_total", "Successfully billed logical decision branches", ["model"])
+
 # ---------------------------------------------------------------------------
 # HTTP request metrics (frontend)
 # ---------------------------------------------------------------------------

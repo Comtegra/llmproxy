@@ -105,6 +105,8 @@ def model_items(cfg):
         }
         if "max_model_len" in meta:
             item["max_model_len"] = meta["max_model_len"]
+        if meta["type"] == "decision":
+            item["endpoints"] = ["/v1/systemone", "/v1/basal", "/v1/decisions"]
         item.update(budget.catalog(cfg, meta))
         items.append(item)
     return items
