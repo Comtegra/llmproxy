@@ -424,6 +424,26 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             {"product": "mymarker/none/conversion", "quantity": 3},
         ])
 
+    async def test_unparsable_backend_json_is_502(self):
+        # A body nested deeper than the parser's recursion limit, or not
+        # UTF-8, is the backend's fault: 502 on both paths, never a 500.
+        nested = b"[" * 100000 + b"]" * 100000
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.submit(background=None, _nested="1")
+        self.assertEqual(status, 502)
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.submit(_nested="1")
+        self.assertEqual(status, 502)
+
+        job_id = await self.queued()
+        for raw in (nested, b"\xff\xfe{}", b"{not json"):
+            with self.subTest(raw=raw[:10]):
+                self.backend.app["marker_control"]["poll_raw"] = raw
+                with self.assertLogs(self.app.logger, level="ERROR"):
+                    status, _, _ = await self.poll(job_id)
+                self.assertEqual(status, 502)
+        self.assertListEqual(await self.get_events(), [])
+
     async def test_backend_without_claim_never_delivers(self):
         job_id = await self.queued(_no_claim="1")
 

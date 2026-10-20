@@ -212,14 +212,7 @@ async def convert(f_req):
             request_id=f_req["request_id"])
 
         body = await b_res.content.read()
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            app.logger.error(
-                "File-convert backend %s returned non-JSON: request_id=%s",
-                b_name, f_req["request_id"])
-            raise aiohttp.web.HTTPBadGateway(
-                text="File conversion backend returned invalid JSON")
+        data = await _backend_json(f_req, b_name, body)
 
         # Datalab Marker returns HTTP 200 even on conversion failure, with
         # success=false. Do not bill those.

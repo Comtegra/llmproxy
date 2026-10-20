@@ -227,6 +227,11 @@ async def marker(req):
             {"success": False, "error": "conversion failed"},
             status=200)
 
+    if post.get("_nested"):
+        # Deeper than the JSON parser's recursion limit.
+        return aiohttp.web.Response(body=b"[" * 100000 + b"]" * 100000,
+            content_type="application/json")
+
     file_field = post.get("file")
     if file_field is None:
         return aiohttp.web.json_response(
@@ -298,6 +303,8 @@ async def marker_poll(req):
         await asyncio.sleep(delay)
     if (status := control.get("poll_status")) is not None:
         return aiohttp.web.json_response({"error": "boom"}, status=status)
+    if (raw := control.get("poll_raw")) is not None:
+        return aiohttp.web.Response(body=raw, content_type="application/json")
 
     job = req.app["marker_jobs"].get(req.match_info["request_id"])
     if job is None:
