@@ -140,11 +140,13 @@ is a `400`.
 
 * **Billing:** the pages are billed when a completed result is picked up for
   the first time; later polls return the same result unbilled. Nothing is
-  billed at submission or for a failed conversion. The backend reports the
-  first pickup exactly once per job, so this holds across repeated or
-  concurrent polls, proxy restarts and replicas. A result the proxy cannot
-  bill (no valid `page_count`, a backend without delivery claims) is never
-  handed out: the poll is a `502`.
+  billed at submission or for a failed conversion. Once the proxy holds a
+  complete, valid result it claims the delivery from the backend, which
+  grants the claim exactly once per job, so this holds across repeated or
+  concurrent polls, proxy restarts and replicas; a fetch that fails or is
+  refused does not use up the first pickup. A result the proxy cannot bill
+  (no valid `page_count`, a backend without delivery claims) is never handed
+  out: the poll is a `502`.
 * **Access:** the id is bound to the API key that submitted the conversion;
   any other key, a modified id, or a job the backend no longer keeps (results
   expire with the backend's retention, 7 days by default) gets `404` with

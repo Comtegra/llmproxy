@@ -267,8 +267,8 @@ def _marker_queue(req, post):
     """Datalab async contract: queue the job, answer with a request id.
 
     Form controls: `_polls` = polls answered "processing" before the job is
-    done; `_poll_fail` = the conversion fails; `_no_claim` = a backend that
-    does not report delivery_claimed; `_pages` (JSON, so 0/true/1.5/"3"
+    done; `_poll_fail` = the conversion fails; `_no_claim` = a backend without
+    the claim endpoint (404); `_pages` (JSON, so 0/true/1.5/"3"
     play a broken backend) / `_omit_page_count` as for the sync path;
     `_claim_raw` = JSON sent as delivery_claimed instead of the one-time bool;
     `_request_id_raw` = JSON sent as request_id (nothing is queued); `_text` =
@@ -330,13 +330,30 @@ async def marker_poll(req):
         "provenance": {"ai_generated": True}}
     if job["pages"] is not None:
         payload["page_count"] = job["pages"]
-    if req.headers.get("X-Delivery-Claim") == "true" and not job["no_claim"]:
-        payload["delivery_claimed"] = not job["claimed"]
-        job["claimed"] = True
-        if job["claim_raw"] is not None:
-            payload["delivery_claimed"] = json.loads(job["claim_raw"])
     return aiohttp.web.json_response(payload,
         headers={"X-AI-Processed": "true"})
+
+
+async def marker_claim(req):
+    """POST {job}/claim (PLAN §3): delivery_claimed=true once per completed
+    job; 409 while it is not completed; 404 for an unknown job."""
+    req.app["marker_claims"].append(dict(req.headers))
+    control = req.app["marker_control"]
+    if (status := control.get("claim_status")) is not None:
+        return aiohttp.web.json_response({"error": "boom"}, status=status)
+
+    job = req.app["marker_jobs"].get(req.match_info["request_id"])
+    if job is None or job["no_claim"]:
+        return aiohttp.web.json_response({"error": "Job not found",
+            "error_code": "JOB_NOT_FOUND"}, status=404)
+    if job["remaining"] > 0 or job["fail"]:
+        return aiohttp.web.json_response({"error": "Job is not completed",
+            "status": "failed" if job["fail"] else "processing"}, status=409)
+    claimed = not job["claimed"]
+    job["claimed"] = True
+    if job["claim_raw"] is not None:
+        claimed = json.loads(job["claim_raw"])
+    return aiohttp.web.json_response({"delivery_claimed": claimed})
 
 
 @aiohttp.web.middleware
@@ -356,6 +373,7 @@ def create_app():
     app["marker_forms"] = []
     app["marker_jobs"] = {}
     app["marker_polls"] = []
+    app["marker_claims"] = []
     app["marker_control"] = {}
     app.add_routes([
         aiohttp.web.post("/v1/systemone", decision),
@@ -371,6 +389,7 @@ def create_app():
         # Path-rewritten target for /v1/files/convert (not path-preserving).
         aiohttp.web.post("/api/v1/marker", marker),
         aiohttp.web.get("/api/v1/marker/{request_id}", marker_poll),
+        aiohttp.web.post("/api/v1/marker/{request_id}/claim", marker_claim),
     ])
     return app
 

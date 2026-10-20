@@ -19,11 +19,16 @@ OBJECT = "file.conversion"
 # Seconds a client should wait before polling a background conversion again.
 RETRY_AFTER = "5"
 
-# Sent on every poll: the backend answers a completed job with
-# delivery_claimed=true exactly once per job, which is when the proxy bills.
-# The proxy keeps no state, so this one-time claim is what makes "bill at the
-# first pickup" hold across repeated polls, restarts and replicas.
-CLAIM_HEADER = "X-Delivery-Claim"
+# POST {job}/claim: the backend answers delivery_claimed=true exactly once per
+# completed job, which is when the proxy bills. The proxy keeps no state, so
+# this one-time claim is what makes "bill at the first pickup" hold across
+# repeated polls, restarts and replicas. Two-phase: the GET that fetches the
+# result changes nothing, and the claim is made only with a complete, valid
+# result in hand, so a fetch that fails or is refused never spends it.
+CLAIM_PATH = "claim"
+
+# The claim answer is a one-field JSON object.
+_MAX_CLAIM_RESPONSE_BYTES = 64 * 1024
 
 # Polls one API key may have in flight at once ([files] max_polls_in_flight).
 # Polls skip the model's rate limits, so without a limit of their own one
@@ -96,9 +101,9 @@ def billing_product(f_req, b_name, b_cfg):
     """The billed resource, ``<backend>/<device>/conversion``, or raise 500.
 
     The config check guarantees a device; this guards the one place where a
-    gap would cost money. A poll computes it before asking the backend for
-    the one-time delivery claim, so a broken config cannot spend the claim
-    and then hand the result out unbilled on the next poll.
+    gap would cost money. A poll computes it before it asks the backend for
+    anything, so a broken config can never fail after the one-time delivery
+    claim was spent.
     """
     device = b_cfg.get("device")
     if not isinstance(device, str) or not device.strip():
@@ -343,16 +348,10 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
 
     product = billing_product(f_req, b_name, b_cfg)
     b_url = yarl.URL(b_cfg["url"]) / MARKER_PATH / parsed.request_id
-    b_hdrs = {
-        "Authorization": "Bearer %s" % b_cfg["token"],
-        CLAIM_HEADER: "true",
-    }
+    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
     ssl = None if b_cfg.get("verify_ssl", True) else False
     # The backend's own read timeout, as for a submission: the answer that
-    # carries a completed result can be large and slow to arrive, and the
-    # backend claims the delivery before sending it -- a proxy timeout in the
-    # middle would leave the claim spent and the result unbilled on the next
-    # poll.
+    # carries a completed result can be large and slow to arrive.
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
         sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
@@ -410,18 +409,16 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned an unknown status")
 
-    return await _completed(f_req, user, b_name, product, parsed, job, data,
-        ai_headers)
+    return await _completed(f_req, user, b_name, b_cfg, product, parsed, job,
+        data, ai_headers)
 
 
-async def _completed(f_req, user, b_name, product, parsed, job, data,
+async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data,
         ai_headers):
     app = f_req.app
 
-    # Every check that can refuse the result runs before billing and depends
-    # only on what the backend stored, so a refused result is refused on
-    # every poll: a result is never handed out without being billable, not
-    # even after the one-time claim was spent on a refused attempt.
+    # Every check that can refuse the result runs before the delivery claim,
+    # so a refused result leaves the claim for the first pickup that works.
     pages = page_count_from_response(data)
     if pages is None:
         app.logger.error(
@@ -429,19 +426,6 @@ async def _completed(f_req, user, b_name, product, parsed, job, data,
             "id=%s: request_id=%s", b_name, job["id"], f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned no page_count")
-
-    claimed = data.get("delivery_claimed")
-    if not isinstance(claimed, bool):
-        # Without the claim the proxy cannot tell the first pickup from the
-        # tenth: billing every poll overcharges, billing none gives it away.
-        app.logger.error(
-            "File-convert backend %s did not report delivery_claimed for "
-            "id=%s (backend does not support background billing; update the "
-            "file-processor): request_id=%s",
-            b_name, job["id"], f_req["request_id"])
-        raise aiohttp.web.HTTPBadGateway(
-            text="File conversion backend does not support background "
-                "conversion")
 
     output = data.get(_content_key(data))
     if not isinstance(output, str):
@@ -459,6 +443,7 @@ async def _completed(f_req, user, b_name, product, parsed, job, data,
     # Serialized off the event loop for the same reason as it was decoded.
     body = (await asyncio.to_thread(json.dumps, result)).encode()
 
+    claimed = await _claim(f_req, b_name, b_cfg, parsed, job["id"])
     if claimed:
         await billing.record(f_req, user, {product: pages})
         app.logger.info("Client used: %d page(s) of %s", pages, b_name)
@@ -470,6 +455,49 @@ async def _completed(f_req, user, b_name, product, parsed, job, data,
         job["id"], f_req["request_id"], parsed.request_id, pages, claimed)
 
     return await _send_in_slot(f_req, body, ai_headers)
+
+
+async def _claim(f_req, b_name, b_cfg, parsed, job_id):
+    """Claim the delivery of a completed job; True for its first pickup only.
+
+    Anything but a 200 with a boolean (409: not completed after all, 404: the
+    job is gone or the backend has no claims) is a 502 without the result:
+    without the claim the proxy cannot tell the first pickup from the tenth,
+    and billing every poll overcharges while billing none gives it away.
+    """
+    app = f_req.app
+
+    b_url = (yarl.URL(b_cfg["url"]) / MARKER_PATH / parsed.request_id
+        / CLAIM_PATH)
+    b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
+    ssl = None if b_cfg.get("verify_ssl", True) else False
+    timeout = aiohttp.ClientTimeout(
+        connect=app["config"]["timeout_connect"],
+        sock_read=app["config"]["timeout_read"])
+
+    with proxy.backend_errors(f_req, b_name) as b_start:
+        async with app["client"].post(b_url, headers=b_hdrs, ssl=ssl,
+                timeout=timeout) as b_res:
+            proxy.observe_backend_response(b_name, b_res, b_start)
+            try:
+                body = await proxy.read_limited(b_res,
+                    _MAX_CLAIM_RESPONSE_BYTES)
+            except ValueError:
+                body = b""
+            status = b_res.status
+
+    data = _decode_json(body) if status == 200 else None
+    claimed = data.get("delivery_claimed") if isinstance(data, dict) else None
+    if not isinstance(claimed, bool):
+        app.logger.error(
+            "File-convert backend %s did not confirm the delivery claim for "
+            "id=%s (status %d, body_preview=%s; a backend without claims "
+            "needs a file-processor update): request_id=%s",
+            b_name, job_id, status,
+            body[:256].decode("utf-8", errors="replace"), f_req["request_id"])
+        raise aiohttp.web.HTTPBadGateway(
+            text="File conversion backend did not confirm the delivery")
+    return claimed
 
 
 async def _send_in_slot(f_req, body, headers):

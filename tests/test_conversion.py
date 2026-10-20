@@ -261,10 +261,15 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             {"product": "mymarker/none/conversion", "quantity": 7},
         ])
 
-        # Every poll carries the backend token and asks for the claim.
-        for b_hdrs in self.backend.app["marker_polls"]:
+        # Two phases: the GETs change nothing, and every completed pickup
+        # (not the in_progress ones) then claims the delivery. Both carry the
+        # backend token.
+        self.assertEqual(len(self.backend.app["marker_polls"]), 6)
+        self.assertEqual(len(self.backend.app["marker_claims"]), 4)
+        for b_hdrs in (self.backend.app["marker_polls"]
+                + self.backend.app["marker_claims"]):
             self.assertEqual(b_hdrs["Authorization"], "Bearer %s" % TOKEN)
-            self.assertEqual(b_hdrs["X-Delivery-Claim"], "true")
+            self.assertNotIn("X-Delivery-Claim", b_hdrs)
 
     async def test_concurrent_first_pickups_bill_once(self):
         self.app["config"]["files"] = {"max_polls_in_flight": 12}
@@ -458,8 +463,7 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertListEqual(await self.get_events(), [])
 
     async def test_bad_page_count_never_delivers(self):
-        # The claim is spent on the first poll; a later poll must not hand
-        # out the result for free either.
+        # Refused before the claim: it is left for a pickup that works.
         job_id = await self.queued(_omit_page_count="1")
 
         for _ in range(2):
@@ -467,6 +471,31 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             self.assertEqual(status, 502)
             self.assertNotIn("hello", str(data))
         self.assertListEqual(await self.get_events(), [])
+        self.assertEqual(self.backend.app["marker_claims"], [])
+
+    async def test_claim_not_confirmed_is_502_without_result(self):
+        # 409 (not completed after all), 404 (job gone, no claim endpoint),
+        # a 5xx or a garbled answer: no result without the claim.
+        job_id = await self.queued(_pages="2")
+        control = self.backend.app["marker_control"]
+        for status in (409, 404, 500, 503):
+            with self.subTest(claim_status=status):
+                control["claim_status"] = status
+                with self.assertLogs(self.app.logger, level="ERROR") as logs:
+                    code, _, data = await self.poll(job_id)
+                self.assertEqual(code, 502)
+                self.assertNotIn("hello", str(data))
+                self.assertIn("status %d" % status, logs.output[-1])
+        self.assertListEqual(await self.get_events(), [])
+
+        # None of those spent the claim: the first pickup that works bills.
+        del control["claim_status"]
+        code, _, data = await self.poll(job_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["status"], "completed")
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 2},
+        ])
 
     async def test_backend_errors_on_poll(self):
         job_id = await self.queued()
@@ -622,7 +651,8 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         await self.poll(job_id)
         await self.poll(job_id)
 
-        self.assertEqual(counter._value.get(), before + 2)
+        # in_progress: one GET; completed: the GET and the claim.
+        self.assertEqual(counter._value.get(), before + 3)
 
     async def test_owner_keeps_access_after_reload_with_same_token(self):
         job_id = await self.queued(_pages="2")
@@ -696,13 +726,16 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             self.assertNotIn("xxxx", str(data))
             self.assertIn("max_poll_response_bytes", logs.output[0])
         self.assertListEqual(await self.get_events(), [])
-
-        # Within the limit the same kind of answer goes through.
-        small = await self.queued(_text="x" * 500)
-        status, _, data = await self.poll(small)
+        # Refused before the claim, so raising the limit lets the first
+        # pickup through -- billed.
+        self.assertEqual(self.backend.app["marker_claims"], [])
+        self.app["config"]["files"] = {"max_poll_response_bytes": 10000}
+        status, _, data = await self.poll(job_id)
         self.assertEqual(status, 200)
-        self.assertEqual(data["output"], "x" * 500)
-
+        self.assertEqual(data["output"], "x" * 3000)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 1},
+        ])
 
     async def test_client_that_does_not_read_keeps_its_slot(self):
         # The result is written inside the poll's slot: a client that never
