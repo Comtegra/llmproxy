@@ -85,7 +85,7 @@ docker kill -s=SIGHUP CONTAINER
 `POST /v1/files/convert` (multipart: `file`, `model`, optional
 `output_format`) converts a PDF with a `conversion` backend (the marker
 microservice) and bills `MODEL/DEVICE/conversion` per page. A `conversion`
-backend must have a non-empty `token`.
+backend must have a non-empty `token` and `device`.
 
 By default the request is synchronous: the response arrives when the
 conversion is done, which can take minutes. With `background=true` the proxy

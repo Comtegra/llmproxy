@@ -89,6 +89,23 @@ def prepare_marker_body(f_req, body):
     return background
 
 
+def billing_product(f_req, b_name, b_cfg):
+    """The billed resource, ``<backend>/<device>/conversion``, or raise 500.
+
+    The config check guarantees a device; this guards the one place where a
+    gap would cost money. A poll computes it before asking the backend for
+    the one-time delivery claim, so a broken config cannot spend the claim
+    and then hand the result out unbilled on the next poll.
+    """
+    device = b_cfg.get("device")
+    if not isinstance(device, str) or not device.strip():
+        f_req.app.logger.error(
+            "File-convert backend %s has no device to bill: request_id=%s",
+            b_name, f_req["request_id"])
+        raise aiohttp.web.HTTPInternalServerError()
+    return "%s/%s/conversion" % (b_name, device)
+
+
 def page_count_from_response(data):
     """Return a billable page count, or None if missing/unusable."""
     pages = data.get("page_count")
@@ -239,7 +256,7 @@ async def convert(f_req):
         f_res = aiohttp.web.Response(body=body, headers=f_hdrs)
 
         await billing.record(f_req, user, {
-            "%s/%s/conversion" % (b_name, b_cfg["device"]): pages,
+            billing_product(f_req, b_name, b_cfg): pages,
         })
 
         app.logger.info("Client used: %d page(s) of %s", pages, b_name)
@@ -328,6 +345,7 @@ async def conversion(f_req):
 async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
     app = f_req.app
 
+    product = billing_product(f_req, b_name, b_cfg)
     b_url = yarl.URL(b_cfg["url"]) / MARKER_PATH / parsed.request_id
     b_hdrs = {
         "Authorization": "Bearer %s" % b_cfg["token"],
@@ -393,11 +411,11 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned an unknown status")
 
-    return await _completed(f_req, user, b_name, b_cfg, parsed, job, data,
+    return await _completed(f_req, user, b_name, product, parsed, job, data,
         ai_headers)
 
 
-async def _completed(f_req, user, b_name, b_cfg, parsed, job, data,
+async def _completed(f_req, user, b_name, product, parsed, job, data,
         ai_headers):
     app = f_req.app
 
@@ -445,9 +463,7 @@ async def _completed(f_req, user, b_name, b_cfg, parsed, job, data,
         content_type="application/json", headers=ai_headers)
 
     if claimed:
-        await billing.record(f_req, user, {
-            "%s/%s/conversion" % (b_name, b_cfg["device"]): pages,
-        })
+        await billing.record(f_req, user, {product: pages})
         app.logger.info("Client used: %d page(s) of %s", pages, b_name)
         metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc(pages)
 

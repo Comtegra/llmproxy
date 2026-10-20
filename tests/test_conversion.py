@@ -400,6 +400,30 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertIn("update the file-processor", logs.output[0])
         self.assertListEqual(await self.get_events(), [])
 
+    async def test_missing_device_fails_before_the_claim(self):
+        # A device lost from the config (past validation, e.g. edited in
+        # place) must fail the poll before the backend spends the one-time
+        # claim; otherwise the next poll would hand the result out unbilled.
+        job_id = await self.queued(_pages="3")
+        b_cfg = self.app["config"]["backends"]["mymarker"]
+        device = b_cfg.pop("device")
+        seen = len(self.backend.app["marker_polls"])
+
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 500)
+        self.assertNotIn("hello", str(data))
+        self.assertEqual(len(self.backend.app["marker_polls"]), seen)
+        self.assertListEqual(await self.get_events(), [])
+
+        b_cfg["device"] = device
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 3},
+        ])
+
     async def test_backend_without_claim_never_delivers(self):
         job_id = await self.queued(_no_claim="1")
 

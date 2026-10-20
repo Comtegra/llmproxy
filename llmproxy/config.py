@@ -98,9 +98,12 @@ def validate(cfg):
         if meta["type"] == "conversion":
             # Besides authenticating the proxy to the backend, the token keys
             # the signature of background conversion ids (conversion_id.py):
-            # with an empty one anybody could mint an id for any job.
-            if type(meta.get("token")) is not str or not meta["token"].strip():
-                raise ConfigError('Backend "%s" token must be a non-empty string' % name)
+            # with an empty one anybody could mint an id for any job. The
+            # device names the billed product; without it a background result
+            # would be claimed and then fail to bill.
+            for key in ("token", "device"):
+                if type(meta.get(key)) is not str or not meta[key].strip():
+                    raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
         if "decision_limits" in meta:
             limits = meta["decision_limits"]
             if meta["type"] != "decision" or type(limits) is not dict:
