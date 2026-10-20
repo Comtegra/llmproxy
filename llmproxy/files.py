@@ -345,11 +345,14 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
         CLAIM_HEADER: "true",
     }
     ssl = None if b_cfg.get("verify_ssl", True) else False
-    # The global read timeout, not the backend's: a poll answers at once, the
-    # backend's long timeout is for waiting out a synchronous conversion.
+    # The backend's own read timeout, as for a submission: the answer that
+    # carries a completed result can be large and slow to arrive, and the
+    # backend claims the delivery before sending it -- a proxy timeout in the
+    # middle would leave the claim spent and the result unbilled on the next
+    # poll.
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
-        sock_read=app["config"]["timeout_read"])
+        sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
 
     with proxy.backend_errors(f_req, b_name) as b_start:
         async with app["client"].get(b_url, headers=b_hdrs, ssl=ssl,
