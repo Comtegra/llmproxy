@@ -85,7 +85,17 @@ docker kill -s=SIGHUP CONTAINER
 `POST /v1/files/convert` (multipart: `file`, `model`, optional
 `output_format`) converts a PDF with a `conversion` backend (the marker
 microservice) and bills `MODEL/DEVICE/conversion` per page. A `conversion`
-backend must have a non-empty `token` and `device`.
+backend must have a non-empty `token` and `device`:
+
+```toml
+[backends.pdf-to-markdown]
+url = "https://marker-microservice.example.com"
+token = "APP_TOKEN"      # the microservice's APP_TOKEN
+device = "a5000"         # billed as pdf-to-markdown/a5000/conversion
+type = "conversion"
+timeout = 1800           # a synchronous conversion takes minutes
+health_path = "healthz"  # the microservice serves /healthz, not /health
+```
 
 By default the request is synchronous: the response arrives when the
 conversion is done, which can take minutes. With `background=true` the proxy
