@@ -350,11 +350,13 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
     b_url = yarl.URL(b_cfg["url"]) / MARKER_PATH / parsed.request_id
     b_hdrs = {"Authorization": "Bearer %s" % b_cfg["token"]}
     ssl = None if b_cfg.get("verify_ssl", True) else False
-    # The backend's own read timeout, as for a submission: the answer that
-    # carries a completed result can be large and slow to arrive.
+    # The global read timeout, not the backend's (which is for waiting out a
+    # synchronous conversion): a poll answers at once, and a backend that
+    # hangs must not hold the key's slot and a pooled connection for
+    # half an hour. A timed-out GET spends nothing, the claim comes after.
     timeout = aiohttp.ClientTimeout(
         connect=app["config"]["timeout_connect"],
-        sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
+        sock_read=app["config"]["timeout_read"])
 
     with proxy.backend_errors(f_req, b_name) as b_start:
         async with app["client"].get(b_url, headers=b_hdrs, ssl=ssl,

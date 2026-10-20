@@ -516,17 +516,21 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertEqual(status, 504)
         self.assertListEqual(await self.get_events(), [])
 
-    async def test_poll_uses_the_backend_timeout(self):
-        # Like a submission: a slow answer (a large completed result) must
-        # not time out at the global timeout_read (1 s in tests).
-        self.app["config"]["backends"]["mymarker"]["timeout"] = 5
+    async def test_poll_uses_the_global_timeout(self):
+        # The backend's long timeout is for synchronous conversions; a hung
+        # poll must not hold a slot that long. Nothing is spent by it: the
+        # next pickup bills.
+        self.app["config"]["backends"]["mymarker"]["timeout"] = 30
         job_id = await self.queued(_pages="2")
         self.backend.app["marker_control"]["poll_delay"] = 1.5
 
-        status, _, data = await self.poll(job_id)
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 504)
+        self.assertEqual(self.backend.app["marker_claims"], [])
 
+        del self.backend.app["marker_control"]["poll_delay"]
+        status, _, data = await self.poll(job_id)
         self.assertEqual(status, 200)
-        self.assertEqual(data["status"], "completed")
         self.assertListEqual(await self.get_events(), [
             {"product": "mymarker/none/conversion", "quantity": 2},
         ])
