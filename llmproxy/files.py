@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import json
 
 import aiohttp
@@ -20,6 +22,19 @@ RETRY_AFTER = "5"
 # The proxy keeps no state, so this one-time claim is what makes "bill at the
 # first pickup" hold across repeated polls, restarts and replicas.
 CLAIM_HEADER = "X-Delivery-Claim"
+
+# Polls one API key may have in flight at once ([files] max_polls_in_flight).
+# Polls skip the model's rate limits, so without a limit of their own one
+# client could tie up the backend connection pool and the memory of the single
+# worker with results, for every other client.
+DEFAULT_MAX_POLLS_IN_FLIGHT = 4
+
+# Largest poll answer read from the backend ([files] max_poll_response_bytes):
+# a completed result carries the Markdown and base64 images.
+DEFAULT_MAX_POLL_RESPONSE_BYTES = 512 * 1024 ** 2
+
+# API key id -> polls in flight. Process-local like the rate-limit counters.
+_polls_in_flight = {}
 
 # Multipart values are strings; accept the spellings clients send for a bool.
 _BACKGROUND = {"true": True, "1": True, "false": False, "0": False}
@@ -82,19 +97,61 @@ def page_count_from_response(data):
     return pages
 
 
-def _poll_json(app, b_name, f_req, body):
-    """Decode the backend's poll answer (a JSON object), or raise 502."""
+_INVALID_JSON = object()
+
+
+def _decode_json(body):
     try:
-        data = json.loads(body)
+        return json.loads(body)
     except (ValueError, RecursionError):
-        data = None
-    if not isinstance(data, dict):
-        app.logger.error(
-            "File-convert backend %s returned a non-JSON poll answer: "
-            "request_id=%s", b_name, f_req["request_id"])
+        # ValueError covers bad JSON and bad UTF-8; RecursionError a body
+        # nested deeper than the parser's recursion limit.
+        return _INVALID_JSON
+
+
+async def _backend_json(f_req, b_name, body):
+    """Decode a backend answer, or raise 502.
+
+    Off the event loop: a completed result can be hundreds of MB of Markdown
+    and base64 images, and the proxy serves everybody from one worker.
+    """
+    data = await asyncio.to_thread(_decode_json, body)
+    if data is _INVALID_JSON:
+        f_req.app.logger.error(
+            "File-convert backend %s returned invalid JSON: request_id=%s",
+            b_name, f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned invalid JSON")
     return data
+
+
+@contextlib.contextmanager
+def _poll_slot(f_req, user, b_name):
+    """Hold one of the API key's poll slots, or raise 429.
+
+    Every poll that reaches the backend goes through here.
+    """
+    limit = f_req.app["config"].get("files", {}).get("max_polls_in_flight",
+        DEFAULT_MAX_POLLS_IN_FLIGHT)
+    key = user["id"]
+    n = _polls_in_flight.get(key, 0)
+    if n >= limit:
+        metrics.RATE_LIMIT_REJECTIONS_TOTAL.labels(b_name,
+            "poll_concurrency").inc()
+        raise errors.json_error(f_req, aiohttp.web.HTTPTooManyRequests,
+            "Too many polls in flight for this API key: %d." % limit,
+            openai_type="rate_limit_exceeded",
+            anthropic_type="rate_limit_error", code="rate_limit_exceeded",
+            headers={"Retry-After": RETRY_AFTER})
+    _polls_in_flight[key] = n + 1
+    try:
+        yield
+    finally:
+        n = _polls_in_flight[key] - 1
+        if n:
+            _polls_in_flight[key] = n
+        else:
+            del _polls_in_flight[key]
 
 
 def _ai_headers(app, b_res):
@@ -241,7 +298,8 @@ async def conversion(f_req):
     Only the API key that submitted the conversion can read it. The result is
     billed the first time it is delivered; later polls return it unbilled.
     Polls do not count against the model's rpm/concurrency limits: a client
-    polling every few seconds must not use up its budget for submitting.
+    polling every few seconds must not use up its budget for submitting. They
+    have a limit of their own instead, on polls in flight per API key.
     """
     app = f_req.app
 
@@ -257,6 +315,13 @@ async def conversion(f_req):
             or not conversion_id.verify(b_cfg.get("token"), user["id"],
                 parsed):
         raise _not_found(f_req)
+
+    with _poll_slot(f_req, user, b_name):
+        return await _poll(f_req, user, job_id, parsed, b_name, b_cfg)
+
+
+async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
+    app = f_req.app
 
     b_url = yarl.URL(b_cfg["url"]) / MARKER_PATH / parsed.request_id
     b_hdrs = {
@@ -274,11 +339,28 @@ async def conversion(f_req):
         async with app["client"].get(b_url, headers=b_hdrs, ssl=ssl,
                 timeout=timeout) as b_res:
             proxy.observe_backend_response(b_name, b_res, b_start)
-            await proxy.check_response(app, b_name, b_res,
-                request_id=f_req["request_id"])
-            body = await b_res.read()
-            data = _poll_json(app, b_name, f_req, body)
+            limit = app["config"].get("files", {}).get(
+                "max_poll_response_bytes", DEFAULT_MAX_POLL_RESPONSE_BYTES)
+            try:
+                await proxy.check_response(app, b_name, b_res,
+                    request_id=f_req["request_id"], max_bytes=limit)
+                body = await proxy.read_limited(b_res, limit)
+            except ValueError:
+                app.logger.error(
+                    "File-convert backend %s poll answer exceeds %d bytes "
+                    "(raise [files] max_poll_response_bytes): request_id=%s",
+                    b_name, limit, f_req["request_id"])
+                raise aiohttp.web.HTTPBadGateway(
+                    text="File conversion backend answer too large")
             ai_headers = _ai_headers(app, b_res)
+
+    data = await _backend_json(f_req, b_name, body)
+    if not isinstance(data, dict):
+        app.logger.error(
+            "File-convert backend %s returned a poll answer that is not a "
+            "JSON object: request_id=%s", b_name, f_req["request_id"])
+        raise aiohttp.web.HTTPBadGateway(
+            text="File conversion backend returned invalid JSON")
 
     job = {"id": job_id, "object": OBJECT, "model": b_name}
     status = data.get("status")
@@ -352,7 +434,10 @@ async def _completed(f_req, user, b_name, b_cfg, parsed, job, data,
         "page_count": pages, "images": data.get("images", {})}
     if "provenance" in data:
         result["provenance"] = data["provenance"]
-    f_res = aiohttp.web.json_response(result, headers=ai_headers)
+    # Serialized off the event loop for the same reason as it was decoded.
+    f_res = aiohttp.web.Response(
+        text=await asyncio.to_thread(json.dumps, result),
+        content_type="application/json", headers=ai_headers)
 
     if claimed:
         await billing.record(f_req, user, {

@@ -43,6 +43,14 @@ http_origin = "*"
 #rpm = 60
 #concurrency = 5
 
+# Polling background file conversions (GET /v1/files/convert/{id}). Polls do
+# not count against rpm/concurrency; instead each API key may have at most
+# max_polls_in_flight polls in flight (more get 429), and a poll answer from
+# the backend larger than max_poll_response_bytes is a 502. Reloaded on SIGHUP.
+#[files]
+#max_polls_in_flight = 4
+#max_poll_response_bytes = 536870912  # 512 MiB (Markdown + base64 images)
+
 # EU AI Act Art. 50(2) provenance marking. Generative responses (chat,
 # completions, messages, responses) carry an "X-AI-Generated: true" header;
 # non-streaming ones additionally get a machine-readable top-level

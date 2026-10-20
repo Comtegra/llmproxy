@@ -17,6 +17,10 @@ BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion", "decision")
 DECISION_LIMITS = {"max_questions": 16, "max_branches": 64,
     "max_response_bytes": 4 * 1024 * 1024}
 
+# [files] options (positive integers), the limits on polling background file
+# conversions; defaults live in files.py.
+FILES_OPTIONS = ("max_polls_in_flight", "max_poll_response_bytes")
+
 
 def _validate_rate_limit(rl, prefix=""):
     """Validate a ``[rate_limit]`` / ``[backends.X.rate_limit]`` block.
@@ -64,6 +68,16 @@ def validate(cfg):
                     "provenance.generator must be a non-empty string")
 
     _validate_rate_limit(cfg.get("rate_limit", {}), "")
+
+    files = cfg.get("files", {})
+    if type(files) is not dict:
+        raise ConfigError("files must be a table")
+    if set(files) - set(FILES_OPTIONS):
+        raise ConfigError("files contains unknown options: %s" %
+            ", ".join(sorted(set(files) - set(FILES_OPTIONS))))
+    for key, value in files.items():
+        if type(value) is not int or value <= 0:
+            raise ConfigError("files.%s must be a positive integer" % key)
 
     for name, meta in cfg.get("backends", {}).items():
         # Required: without it the proxy cannot tell which endpoints may reach

@@ -13,7 +13,7 @@ from unittest import mock
 
 import aiohttp
 
-from llmproxy import conversion_id, metrics
+from llmproxy import config, conversion_id, files, metrics
 from llmproxy.app import reload_config
 
 from .test_proxy import LLMProxyAppTestCase
@@ -258,6 +258,7 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             self.assertEqual(b_hdrs["X-Delivery-Claim"], "true")
 
     async def test_concurrent_first_pickups_bill_once(self):
+        self.app["config"]["files"] = {"max_polls_in_flight": 12}
         job_id = await self.queued(_pages="4")
         before = metrics.FILE_CONVERSIONS_TOTAL.labels("mymarker")._value.get()
 
@@ -558,3 +559,79 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertListEqual(await self.get_events(), [
             {"product": "mymarker/none/conversion", "quantity": 2},
         ])
+
+    async def test_polls_in_flight_limited_per_api_key(self):
+        await self.insert_key("othertoken", "otheruser")
+        other = {"Authorization": "Bearer othertoken"}
+        mine = await self.queued(_polls="10")
+        theirs = (await self.submit(headers=other, _polls="10"))[2]["id"]
+        self.backend.app["marker_control"]["poll_delay"] = 0.3
+
+        for limit in (None, 1):
+            with self.subTest(max_polls_in_flight=limit):
+                if limit is not None:
+                    self.app["config"]["files"] = {
+                        "max_polls_in_flight": limit}
+                allowed = limit or files.DEFAULT_MAX_POLLS_IN_FLIGHT
+                seen = len(self.backend.app["marker_polls"])
+
+                results = await asyncio.gather(
+                    *(self.poll(mine) for _ in range(allowed + 1)),
+                    self.poll(theirs, headers=other))
+
+                statuses = sorted(r[0] for r in results[:-1])
+                self.assertEqual(statuses, [200] * allowed + [429])
+                status, headers, data = next(r for r in results if r[0] == 429)
+                self.assertEqual(data["error"]["code"], "rate_limit_exceeded")
+                self.assertEqual(headers["Retry-After"], "5")
+                # Another key is not affected by this key's limit.
+                self.assertEqual(results[-1][0], 200)
+                self.assertEqual(results[-1][2]["status"], "in_progress")
+                # The rejected poll never reached the backend.
+                self.assertEqual(
+                    len(self.backend.app["marker_polls"]) - seen, allowed + 1)
+                # Every slot is released.
+                self.assertEqual(files._polls_in_flight, {})
+
+    async def test_poll_slot_released_on_errors(self):
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        job_id = await self.queued(_omit_page_count="1")
+        for _ in range(3):
+            status, _, _ = await self.poll(job_id)
+            self.assertEqual(status, 502)
+        self.backend.app["marker_control"]["poll_delay"] = 2
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 504)
+        self.assertEqual(files._polls_in_flight, {})
+
+    async def test_oversized_poll_answer_is_502_and_not_billed(self):
+        self.app["config"]["files"] = {"max_poll_response_bytes": 2000}
+        job_id = await self.queued(_text="x" * 3000)
+
+        for _ in range(2):
+            with self.assertLogs(self.app.logger, level="ERROR") as logs:
+                status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 502)
+            self.assertNotIn("xxxx", str(data))
+            self.assertIn("max_poll_response_bytes", logs.output[0])
+        self.assertListEqual(await self.get_events(), [])
+
+        # Within the limit the same kind of answer goes through.
+        small = await self.queued(_text="x" * 500)
+        status, _, data = await self.poll(small)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["output"], "x" * 500)
+
+
+class TestFilesConfig(unittest.TestCase):
+    def test_files_options(self):
+        config.validate({"files": {"max_polls_in_flight": 2,
+            "max_poll_response_bytes": 1024}})
+        for files_cfg in ({"max_polls_in_flight": 0},
+                {"max_polls_in_flight": -1}, {"max_polls_in_flight": True},
+                {"max_polls_in_flight": "4"},
+                {"max_poll_response_bytes": 1.5}, {"max_poll_typo": 4},
+                []):
+            with self.subTest(files=files_cfg), \
+                    self.assertRaises(config.ConfigError):
+                config.validate({"files": files_cfg})

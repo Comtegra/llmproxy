@@ -127,10 +127,11 @@ def reload_config(app):
         app.logger.error("Failed reloading config: %s", e)
         return
 
-    # Only backends, rate limits, provenance, budgets and auth cache settings are
-    # reloaded
+    # Only backends, rate limits (and the file-conversion poll limits),
+    # provenance, budgets and auth cache settings are reloaded
     app["config"]["backends"] = cfg.get("backends", {})
     app["config"]["rate_limit"] = cfg.get("rate_limit", {})
+    app["config"]["files"] = cfg.get("files", {})
     app["config"]["provenance"] = cfg.get("provenance", {})
     app["config"]["budget"] = cfg.get("budget", {})
     app["config"]["auth_cache_ttl"] = cfg.get("auth_cache_ttl",

@@ -24,8 +24,8 @@ idempotent.
 ## Configuration
 
 See [llmproxy/config.toml](llmproxy/config.toml) for an example configuration file.
-The program will update the list of configured backends, the rate limits and
-the `[provenance]` settings (see
+The program will update the list of configured backends, the rate limits
+(including the `[files]` poll limits) and the `[provenance]` settings (see
 [AI Act provenance marking](#eu-ai-act-provenance-marking-art-502)) from the
 config file on SIGHUP. SIGHUP also flushes the authentication cache (see
 [Authentication](#authentication)).
@@ -152,7 +152,10 @@ is a `400`.
   backend and its job id, signed with a key derived from the backend's
   `token`. Changing that token invalidates the ids of open conversions.
 * **Rate limits:** polls do not count against the model's `rpm` or
-  `concurrency` limits; only the submission does.
+  `concurrency` limits; only the submission does. Instead each API key may
+  have at most 4 polls in flight (more get `429` with `Retry-After`), and a
+  backend answer over 512 MiB is a `502`. Both are set in `[files]`
+  (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.
 * **Upgrading:** the backend must support background conversions
   (file-processor with `background` and delivery claims). Deploy it before
   the proxy; with an older backend synchronous requests keep working and
