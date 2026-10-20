@@ -550,6 +550,53 @@ class TestBackgroundConversion(ConversionTestCase):
                 self.assertNotIn("hello", str(data))
         self.assertListEqual(await self.get_events(), [])
 
+    async def test_full_backend_ids_only_in_the_reconciliation_log(self):
+        # The backend request id fetches the result from the backend, and
+        # the conversion id carries it: routine lines (queued, delivered,
+        # refusals) log short forms, only "Delivery claim outcome unknown"
+        # logs them in full, for billing by hand.
+        control = self.backend.app["marker_control"]
+        with self.assertLogs(level="DEBUG") as logs:
+            delivered = await self.queued(_polls="1")
+            await self.poll(delivered)
+            await self.poll(delivered)
+            refused = await self.queued(_omit_page_count="1")
+            await self.poll(refused)
+            control["claim_status"] = 404
+            unconfirmed = await self.queued()
+            await self.poll(unconfirmed)
+            del control["claim_status"]
+            control["claim_delay"] = 1.5
+            unknown = await self.queued()
+            await self.poll(unknown)
+
+        app_lines = [line for line in logs.output
+            if line.startswith(("ERROR:aiohttp.web:", "WARNING:aiohttp.web:",
+                "INFO:aiohttp.web:", "DEBUG:aiohttp.web:"))]
+        self.assertTrue(any("Background conversion queued" in line
+            for line in app_lines))
+        self.assertTrue(any("Background conversion delivered" in line
+            for line in app_lines))
+        for job_id in (delivered, refused, unconfirmed, unknown):
+            rid = conversion_id.parse(job_id).request_id
+            # Short forms are there to tie the lines together.
+            self.assertTrue(any(rid[:8] in line for line in app_lines))
+            for line in app_lines:
+                if job_id == unknown \
+                        and "Delivery claim outcome unknown" in line:
+                    self.assertIn(rid, line)
+                    self.assertIn(job_id, line)
+                    continue
+                self.assertNotIn(job_id, line)
+            # The hex request id never appears in full anywhere else in the
+            # proxy's logs, its access log included (the mock backend's own
+            # access log, in this process too, is not the proxy's).
+            for line in logs.output:
+                if "Delivery claim outcome unknown" in line \
+                        or "/api/v1/marker/" in line:
+                    continue
+                self.assertNotIn(rid, line)
+
     async def test_backend_errors_on_poll(self):
         job_id = await self.queued()
         control = self.backend.app["marker_control"]

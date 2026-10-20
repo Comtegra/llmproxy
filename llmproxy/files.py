@@ -295,10 +295,11 @@ def _accepted(f_req, user, b_name, b_cfg, data):
 
     job_id = conversion_id.make(b_cfg["token"], user["id"], b_name,
         b_request_id)
+    log_id, log_rid = _log_ids(job_id, b_request_id)
     app.logger.info(
         "Background conversion queued: id=%s request_id=%s "
         "backend_request_id=%s model=%s",
-        job_id, f_req["request_id"], b_request_id, b_name)
+        log_id, f_req["request_id"], log_rid, b_name)
 
     return aiohttp.web.json_response({
         "id": job_id,
@@ -309,6 +310,18 @@ def _accepted(f_req, user, b_name, b_cfg, data):
         "Location": "/v1/files/convert/%s" % job_id,
         "Retry-After": RETRY_AFTER,
     })
+
+
+def _log_ids(job_id, b_request_id):
+    """Short forms of a conversion's ids for routine log lines.
+
+    The backend's request id is enough to fetch the result from the backend
+    with its token, and the conversion id carries it (base64), so neither is
+    logged in full except where a person needs it to bill by hand ("Delivery
+    claim outcome unknown"). The end of the id's tag and the start of the
+    backend request id still tie the lines of one conversion together.
+    """
+    return "fc_...%s" % job_id[-8:], b_request_id[:8]
 
 
 def _content_key(data):
@@ -411,7 +424,8 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
     if status != "complete":
         app.logger.error(
             "File-convert backend %s returned unknown status %r for "
-            "id=%s: request_id=%s", b_name, status, job_id,
+            "id=%s: request_id=%s", b_name, status,
+            _log_ids(job_id, parsed.request_id)[0],
             f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned an unknown status")
@@ -434,7 +448,8 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
     if pages is None:
         app.logger.error(
             "File-convert backend %s returned no billable page_count for "
-            "id=%s: request_id=%s", b_name, job["id"], f_req["request_id"])
+            "id=%s: request_id=%s", b_name,
+            _log_ids(job["id"], parsed.request_id)[0], f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned no page_count")
 
@@ -442,7 +457,8 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
     if not isinstance(output, str):
         app.logger.error(
             "File-convert backend %s returned no converted text for id=%s: "
-            "request_id=%s", b_name, job["id"], f_req["request_id"])
+            "request_id=%s", b_name,
+            _log_ids(job["id"], parsed.request_id)[0], f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned no output")
 
@@ -460,10 +476,11 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
         app.logger.info("Client used: %d page(s) of %s", pages, b_name)
         metrics.FILE_CONVERSIONS_TOTAL.labels(b_name).inc(pages)
 
+    log_id, log_rid = _log_ids(job["id"], parsed.request_id)
     app.logger.info(
         "Background conversion delivered: id=%s request_id=%s "
         "backend_request_id=%s pages=%d billed=%s",
-        job["id"], f_req["request_id"], parsed.request_id, pages, claimed)
+        log_id, f_req["request_id"], log_rid, pages, claimed)
 
     return body
 
@@ -517,7 +534,7 @@ async def _claim(f_req, user, b_name, b_cfg, parsed, job_id, pages):
             "File-convert backend %s did not confirm the delivery claim for "
             "id=%s (status %d, body_preview=%s; a backend without claims "
             "needs a file-processor update): request_id=%s",
-            b_name, job_id, status,
+            b_name, _log_ids(job_id, parsed.request_id)[0], status,
             body[:256].decode("utf-8", errors="replace"), f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend did not confirm the delivery")
