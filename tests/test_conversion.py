@@ -746,6 +746,9 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         # reads it keeps holding the slot (and the result in memory), so it
         # cannot pile up one result after another.
         self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        # Well past this test: a client that stops reading is cut off after
+        # timeout_read (test_reader_that_stops_is_cut_off).
+        self.app["config"]["timeout_read"] = 10
         size = 32 * 1024 ** 2
         job_id = await self.queued(_text_size=str(size))
 
@@ -769,6 +772,42 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
                 break
             await asyncio.sleep(0.01)
         self.assertEqual(files._polls_in_flight, {})
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["output"]), size)
+        self.assertEqual(len(await self.get_events()), 1)
+
+    async def test_reader_that_stops_is_cut_off(self):
+        # Each piece of the result must be taken within timeout_read (1 s in
+        # tests): a client that stops reading loses the connection and frees
+        # its slot -- and the result -- instead of keeping them for good.
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        reader, writer = await asyncio.open_connection(self.server.host,
+            self.server.port)
+        try:
+            with self.assertLogs(self.app.logger, level="WARNING") as logs:
+                writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\n"
+                    "Host: test\r\nAuthorization: Bearer mytoken\r\n\r\n"
+                    % job_id).encode())
+                await writer.drain()
+                self.assertEqual(len(await self.get_events(expect=1)), 1)
+                self.assertEqual(files._polls_in_flight, {"myuser": 1})
+                for _ in range(400):
+                    if not files._polls_in_flight:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(files._polls_in_flight, {})
+            self.assertIn("stopped reading", "\n".join(logs.output))
+            # The connection is gone, though this client never closed it.
+            await asyncio.wait_for(reader.read(), 5)
+            self.assertTrue(reader.at_eof())
+        finally:
+            writer.close()
+
+        # Billed once already: the next pickup gets the result unbilled.
         status, _, data = await self.poll(job_id)
         self.assertEqual(status, 200)
         self.assertEqual(len(data["output"]), size)

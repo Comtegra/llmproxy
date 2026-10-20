@@ -161,6 +161,8 @@ is a `400`.
   have at most 4 polls in flight (more get `429` with `Retry-After`), and a
   backend answer over 128 MiB is a `502`. Both are set in `[files]`
   (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.
+  A client that stops reading a result for `timeout_read` loses the
+  connection (the result was billed; the next poll returns it unbilled).
 * **Upgrading:** the backend must support background conversions
   (file-processor with `background` and delivery claims). Deploy it before
   the proxy. With an older file-processor synchronous requests keep working

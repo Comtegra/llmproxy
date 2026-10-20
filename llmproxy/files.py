@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 
@@ -28,6 +29,12 @@ CLAIM_PATH = "claim"
 
 # The claim answer is a one-field JSON object.
 _MAX_CLAIM_RESPONSE_BYTES = 64 * 1024
+
+# A result is handed to the client in pieces of this size, each of which must
+# be taken within timeout_read: a client that stops reading is cut off instead
+# of holding its slot and the result in memory for good, while a slow one that
+# keeps reading gets the whole result.
+_WRITE_CHUNK = 1024 * 1024
 
 # Polls one API key may have in flight at once ([files] max_polls_in_flight).
 # Polls skip the model's rate limits, so without a limit of their own one
@@ -375,6 +382,7 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
             ai_headers = _ai_headers(app, b_res)
 
     data = _backend_json(f_req, b_name, body)
+    del body
     if not isinstance(data, dict):
         app.logger.error(
             "File-convert backend %s returned a poll answer that is not a "
@@ -408,12 +416,16 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend returned an unknown status")
 
-    return await _completed(f_req, user, b_name, b_cfg, product, parsed, job,
-        data, ai_headers)
+    result = await _completed(f_req, user, b_name, b_cfg, product, parsed,
+        job, data)
+    # Only the encoded result is needed from here on; the write can take a
+    # while, so the decoded answer must not stay in memory for it.
+    del data
+    return await _send_in_slot(f_req, result, ai_headers)
 
 
-async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data,
-        ai_headers):
+async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
+    """Check, claim and bill a completed result; return it encoded."""
     app = f_req.app
 
     # Every check that can refuse the result runs before the delivery claim,
@@ -452,7 +464,7 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data,
         "backend_request_id=%s pages=%d billed=%s",
         job["id"], f_req["request_id"], parsed.request_id, pages, claimed)
 
-    return await _send_in_slot(f_req, body, ai_headers)
+    return body
 
 
 async def _claim(f_req, b_name, b_cfg, parsed, job_id):
@@ -504,17 +516,31 @@ async def _send_in_slot(f_req, body, headers):
     A Response returned by the handler is written after the handler -- and
     the slot -- is gone: a client that never reads would pile results up in
     memory while its slots stay free for more polls. Sending here keeps every
-    result being written inside one of the key's slots.
+    result being written inside one of the key's slots, and _WRITE_CHUNK
+    bounds how long a client that stopped reading keeps it.
     """
+    app = f_req.app
+    timeout = app["config"]["timeout_read"]
     f_res = aiohttp.web.StreamResponse(headers=headers)
     f_res.content_type = "application/json"
     f_res.charset = "utf-8"
     f_res.content_length = len(body)
     streaming.set_prepared_headers(f_req, f_res)
+    view = memoryview(body)
     try:
-        await f_res.prepare(f_req)
-        await f_res.write(body)
-        await f_res.write_eof()
+        await asyncio.wait_for(f_res.prepare(f_req), timeout)
+        for start in range(0, len(view), _WRITE_CHUNK):
+            await asyncio.wait_for(
+                f_res.write(view[start:start + _WRITE_CHUNK]), timeout)
+        await asyncio.wait_for(f_res.write_eof(), timeout)
+    # Before OSError: asyncio.TimeoutError is an OSError since Python 3.11.
+    except asyncio.TimeoutError:
+        app.logger.warning(
+            "Client stopped reading a background conversion result for %ss; "
+            "connection dropped: request_id=%s", timeout, f_req["request_id"])
+        # abort, not close: close would keep flushing the buffered result.
+        if (transport := f_req.transport) is not None:
+            transport.abort()
     except OSError as e:
-        f_req.app.logger.info("Client disconnected: %s", e)
+        app.logger.info("Client disconnected: %s", e)
     return f_res
