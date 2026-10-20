@@ -38,22 +38,75 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `embedding` | `/v1/embeddings` |
 | `transcription` | `/v1/audio/transcriptions` |
 | `conversion` | `/v1/files/convert` |
-| `decision` | `/v1/systemone`, `/v1/basal`, `/v1/decisions` |
+| `decision` | `/v1/systemone` (native), `/v1/decisions` (OpenAI Decisions subset) |
 
-Native Basal decisions use their own request/response schema and token usage,
-with the same client authentication and billing as the other endpoints.
-See [Basal configuration, examples and local E2E tests](docs/basal_decisions.md).
-The `decision` backend's `model` is catalog metadata; its routing alias is
-removed from the body forwarded to Basal.
-All three decision endpoints use the same handler and forward to the
-backend's `/v1/systemone` route.
+Decision backends expose two formats:
 
-A request naming a model on an endpoint of another type (e.g. chat completions
-with an embedding model) is rejected with `404` and `code: model_not_supported`
-before it reaches the backend: it is not billed and does not count against
-rate limits. An unknown model gets `404` with `code: model_not_found`. On
-`/v1/messages` both use the Anthropic error shape (`not_found_error`). The type
-is exposed through `/v1/models`.
+- `/v1/systemone` accepts the native Basal request/response
+  contract and all six native question types: `noul`, `choice`, `score`,
+  `multi`, `act`, and `tool`.
+- `/v1/decisions` accepts a supported subset of the
+  [OpenAI Decisions beta API](https://developers.openai.com/api/docs/guides/decisions):
+  text input and `predicate`, `choice`, and `score` questions. This proxy uses
+  our configured Basal backend, not a hosted OpenAI model.
+
+The `basal` wire adapter forwards both
+formats to the backend's `/v1/systemone`. `decision_adapter = "basal"` is the
+configuration default. The public model alias is removed from the native
+backend payload. Other wire adapters remain available on the native route;
+OpenAI Decisions currently requires the Basal adapter.
+
+### OpenAI Decisions
+
+Use a Python SDK exposing `client.decisions` (tested with `openai==3.26.0`):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="YOUR_PROXY_BASE_URL/v1",
+    api_key="YOUR_PROXY_API_KEY",
+)
+result = client.decisions.create(
+    model="basal-20-max",
+    input="The customer received a damaged product.",
+    questions=[{
+        "type": "predicate",
+        "name": "complaint",
+        "instructions": "Is this a complaint?",
+    }],
+)
+print(result.answers[0].probability)
+```
+
+Requests use `model`, a text-string `input`, and an ordered `questions` array.
+Answers are returned directly in `answers`, in request order. `predicate`
+returns the probability of true; `choice` preserves string/boolean values;
+`score` returns the expected zero-based level index, which may be fractional.
+The adapter does not generate conversational text or a natural-language summary.
+
+Message arrays, images, files, streaming, generation parameters, cache controls,
+`safety_identifier`, unknown fields and native-only question types return 400
+before inference. Each choice/score question requires 2-255 unique values/labels.
+Configured question and branch limits also apply. This is a supported subset of
+an OpenAI beta contract, not equivalent model calibration or refusal behavior.
+
+Both formats share authentication, per-user/model rate limits, timeouts,
+validated billing and metrics. Usage comes from native input/output counts;
+JSON serialization adds no model tokens. Required cache/reasoning detail
+counters are zero because these tokens are not separately accounted by this
+adapter; the counters do not measure physical cache reuse. Invalid or incomplete
+backend answers fail with 502 before billing.
+
+The model catalog lists the native endpoint and, for supported adapters,
+`/v1/decisions`. `decision_capabilities.question_types` describes native types;
+`openai_question_types`, `openai_input` and `openai_streaming` describe the
+OpenAI frontend. See [the Decisions guide](docs/openai_decisions.md) for curl
+examples and supported limits.
+
+A request naming a model on an endpoint of another type is rejected with 404
+and `code: model_not_supported` before inference, rate limiting and billing.
+An unknown model receives 404 and `code: model_not_found`.
 
 **Upgrading:** the proxy refuses to start while any backend lacks a valid
 `type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which

@@ -11,25 +11,26 @@ from unittest import mock
 import aiohttp.web
 import aiohttp.test_utils
 
-from llmproxy import billing, config, decisions, proxy, ratelimit
+from llmproxy import basal, billing, config, decision_adapters, proxy, ratelimit
+from llmproxy.decision_contract import DecisionCapabilities, DecisionResult, DecisionUsage
 from llmproxy.app import reload_config
 from llmproxy.db import DatabaseError, _billing_document, get_db
 from tests.test_proxy import LLMProxyAppTestCase
 
 
 def payload():
-    return {"model": "basal-2.0-max", "state": {"text": "Synthetic test"},
+    return {"model": "basal-20-max", "state": {"text": "Synthetic test"},
         "questions": {"category": {"criteria": {"yes": "Yes", "no": "No"}}}}
 
 
 class TestDecisionConfig(unittest.TestCase):
     def test_packaged_basal_example_loads(self):
         source = importlib.resources.files("llmproxy").joinpath("config.toml").read_text()
-        example = source[source.index('#[backends."basal-2.0-max"]'):]
+        example = source[source.index('#[backends.basal-20-max]'):]
         cfg = tomllib.loads("\n".join(line.removeprefix("#") for line in example.splitlines()))
         config.validate(cfg)
-        self.assertEqual(list(cfg["backends"]), ["basal-2.0-max"])
-        self.assertEqual(cfg["backends"]["basal-2.0-max"]["decision_limits"]["max_branches"], 64)
+        self.assertEqual(list(cfg["backends"]), ["basal-20-max"])
+        self.assertEqual(cfg["backends"]["basal-20-max"]["decision_limits"]["max_branches"], 64)
 
     def test_configuration(self):
         backend = {"type": "decision", "url": "https://example.org",
@@ -46,17 +47,53 @@ class TestDecisionConfig(unittest.TestCase):
     def test_branches(self):
         body = payload()
         body["questions"] = {"q": {"type": "choice", "criteria": {str(i): str(i) for i in range(255)}}}
-        self.assertEqual(decisions.prepare(copy.deepcopy(body), {})[1], 1)
+        self.assertEqual(basal.prepare(body, config.DECISION_LIMITS).branches, 1)
         for question, count in (({"type": "multi", "criteria": ["a", "b"]}, 2),
                 ({"type": "tool", "multi": True, "tools": [{"name": "a"}]}, 1),
                 ({"type": "tool", "multi": True, "tools": [{"name": "a"}], "extra": ["none"]}, 2)):
             body["questions"] = {"q": question}
             with self.subTest(question=question):
-                self.assertEqual(decisions.prepare(copy.deepcopy(body), {})[1], count)
-                decisions.prepare(copy.deepcopy(body), {"decision_limits": {"max_branches": count}})
+                self.assertEqual(basal.prepare(body, config.DECISION_LIMITS).branches, count)
+                basal.prepare(body, config.DECISION_LIMITS | {"max_branches": count})
                 if count > 1:
                     with self.assertRaises(ValueError):
-                        decisions.prepare(copy.deepcopy(body), {"decision_limits": {"max_branches": count - 1}})
+                        basal.prepare(body, config.DECISION_LIMITS | {"max_branches": count - 1})
+
+    def test_adapter_configuration(self):
+        backend = {"type": "decision", "url": "https://example.org",
+            "model": "basal", "device": "a5000"}
+        config.validate({"backends": {"basal": backend | {"decision_adapter": "basal"}}})
+        self.assertIs(decision_adapters.get_adapter(backend), basal.ADAPTER)
+        for value in ("unknown", "", None, True, []):
+            with self.subTest(adapter=value), self.assertRaises(config.ConfigError):
+                config.validate({"backends": {"basal": backend | {"decision_adapter": value}}})
+        with self.assertRaises(config.ConfigError):
+            config.validate({"backends": {"chat": {"type": "chat", "decision_adapter": "basal"}}})
+
+    def test_preparation_preserves_client_input_and_request_specific_validation(self):
+        body = payload()
+        original = copy.deepcopy(body)
+        first = basal.ADAPTER.prepare(body, config.DECISION_LIMITS)
+        second = basal.ADAPTER.prepare(body | {"questions": {"other": {"type": "noul"}}},
+            config.DECISION_LIMITS)
+        self.assertEqual(body, original)
+        self.assertNotIn("model", first.body)
+        self.assertEqual(first.question_count, 1)
+        data = {"model": "basal", "answers": {"category": {"type": "choice", "choice": "yes",
+            "probabilities": {"yes": 1}, "confidence": 1}},
+            "usage": {"input_tokens": 15, "output_tokens": 0}}
+        result = first.decode(data)
+        self.assertEqual(result.usage, DecisionUsage(15, 0))
+        self.assertEqual(result.answers, data["answers"])
+        self.assertEqual(result.native, data)
+        with self.assertRaises(ValueError):
+            second.decode(data)
+
+    def test_contract_rejects_unbillable_usage(self):
+        for value in (-1, True, "1", 1.5, 2 ** 63, float("nan")):
+            for counts in ((value, 0), (1, value)):
+                with self.subTest(counts=counts), self.assertRaises(ValueError):
+                    DecisionUsage(*counts)
 
     def test_reload(self):
         app = {"config": {"_path": "test", "backends": {} }}
@@ -83,7 +120,7 @@ class TestDecisions(LLMProxyAppTestCase):
 
     async def get_application(self):
         app = await super().get_application()
-        app["config"]["backends"]["basal-2.0-max"] = {
+        app["config"]["backends"]["basal-20-max"] = {
             "url": str(self.backend.make_url("" )).rstrip("/"),
             "type": "decision", "model": "Remek/basal-2.0-max-GGUF",
             "device": "a5000", "max_model_len": 32768, "timeout": 5}
@@ -104,11 +141,11 @@ class TestDecisions(LLMProxyAppTestCase):
 
     @property
     def backend_config(self):
-        return self.app["config"]["backends"]["basal-2.0-max"]
+        return self.app["config"]["backends"]["basal-20-max"]
 
-    async def test_aliases_forward_and_bill_once(self):
+    async def test_native_route_forwards_and_bills_once(self):
         self.app["config"]["budget"] = {"enabled": True}
-        for path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
+        for path in ("/v1/systemone",):
             body = payload()
             body["questions"].update({"q%d" % i: {"type": "choice"} for i in range(5)})
             res = await self.post(body, path)
@@ -118,19 +155,85 @@ class TestDecisions(LLMProxyAppTestCase):
             forwarded, headers = self.calls[-1]
             self.assertEqual(forwarded, {k: v for k, v in body.items() if k != "model"})
             self.assertNotIn("Authorization", headers)
-        self.assertEqual([x["quantity"] for x in await self.get_events()], [880, 0, 880, 0, 880, 0])
-        self.assertEqual(self.backend.app["paths"].count("/v1/systemone"), 3)
+        self.assertEqual([x["quantity"] for x in await self.get_events()], [880, 0])
+        self.assertEqual(self.backend.app["paths"].count("/v1/systemone"), 1)
 
     async def test_backend_token_and_catalog(self):
         self.backend_config["token"] = "upstream-secret"
         self.assertEqual((await self.post()).status, 200)
         self.assertEqual(self.calls[-1][1]["Authorization"], "Bearer upstream-secret")
-        res = await self.client.get("/v1/models/basal-2.0-max", headers={"Authorization": "Bearer mytoken"})
+        res = await self.client.get("/v1/models/basal-20-max", headers={"Authorization": "Bearer mytoken"})
         item = await res.json()
         self.assertEqual(item["type"], "decision")
-        self.assertEqual(item["endpoints"], ["/v1/systemone", "/v1/basal", "/v1/decisions"])
+        self.assertEqual(item["endpoints"], ["/v1/systemone", "/v1/decisions"])
+        self.assertEqual(item["decision_capabilities"]["openai_question_types"], ["predicate", "choice", "score"])
+        self.assertEqual(item["decision_capabilities"]["openai_input"], "text")
+        self.assertFalse(item["decision_capabilities"]["openai_streaming"])
+        self.assertNotIn("chat_input", item["decision_capabilities"])
         self.assertNotIn("token", item)
         self.assertNotIn("url", item)
+
+    async def test_explicit_basal_adapter_preserves_native_response_bytes(self):
+        self.backend_config["decision_adapter"] = "basal"
+        raw = json.dumps({"model": "basal", "answers": {"category": {
+            "type": "choice", "choice": "yes", "probabilities": {"yes": 1}, "confidence": 1}},
+            "usage": {"input_tokens": 23, "output_tokens": 0},
+            "backend_metadata": {"calibration": "native"}}, indent=2).encode()
+        self.control["raw"] = raw
+        response = await self.post(path="/v1/systemone")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), raw)
+        self.assertEqual([event["quantity"] for event in await self.get_events()], [23, 0])
+
+    async def test_other_adapter_routes_and_bills_its_normalized_usage(self):
+        # A deliberately non-Basal wire format proves the HTTP service does
+        # not require Basal paths, question fields or native token field names.
+        received = []
+
+        async def handle(request):
+            received.append((await request.json(), request.headers.get("Authorization")))
+            return aiohttp.web.json_response({"value": "yes", "tokens": 12})
+
+        class Prepared:
+            question_count = 1
+            branches = 1
+
+            def __init__(self, body):
+                self.body = {"text": body["document"]}
+
+            def decode(self, data):
+                if data.get("value") != "yes":
+                    raise ValueError("invalid_answers")
+                return DecisionResult("other", {"result": data["value"]},
+                    DecisionUsage(data["tokens"], 0), data)
+
+        class Adapter:
+            path = "decide"
+            capabilities = DecisionCapabilities(frozenset({"binary"}))
+
+            def prepare(self, body, limits):
+                return Prepared(body)
+
+        app = aiohttp.web.Application()
+        app.router.add_post("/decide", handle)
+        async with aiohttp.test_utils.TestServer(app) as server:
+            self.app["config"]["backends"]["other-decision"] = {
+                "type": "decision", "decision_adapter": "other", "model": "other",
+                "device": "cpu", "url": str(server.make_url("")).rstrip("/"), "token": "other-key"}
+            with mock.patch.dict(decision_adapters._ADAPTERS, {"other": Adapter()}):
+                for path in ("/v1/systemone",):
+                    res = await self.post({"model": "other-decision", "document": "Synthetic"}, path=path)
+                    self.assertEqual(res.status, 200, await res.text())
+                    self.assertEqual(await res.json(), {"value": "yes", "tokens": 12})
+                res = await self.post({"model": "other-decision", "input": "Synthetic",
+                    "questions": [{"type": "predicate", "instructions": "Yes?"}]}, path="/v1/decisions")
+                self.assertEqual(res.status, 400)
+                catalog = await self.client.get("/v1/models/other-decision",
+                    headers={"Authorization": "Bearer mytoken"})
+                self.assertEqual((await catalog.json())["endpoints"], ["/v1/systemone"])
+        self.assertEqual(received, [({"text": "Synthetic"}, "Bearer other-key")])
+        self.assertEqual(self.calls, [])
+        self.assertEqual([event["quantity"] for event in await self.get_events()], [12, 0])
 
     async def test_rejections_do_not_contact_backend(self):
         cases = [(payload(), "badtoken", 401),
@@ -139,17 +242,18 @@ class TestDecisions(LLMProxyAppTestCase):
             (payload() | {"questions": []}, "mytoken", 400),
             (payload() | {"questions": {"q": {"type": []}}}, "mytoken", 400),
             (payload() | {"stream": True}, "mytoken", 400)]
-        for field in decisions.CHAT_FIELDS:
+        for field in basal.CHAT_FIELDS:
             cases.append((payload() | {field: []}, "mytoken", 400))
         body = payload()
         del body["state"]
         cases.append((body, "mytoken", 400))
-        for path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
+        for path in ("/v1/systemone",):
             for body, token, status in cases:
                 with self.subTest(path=path, body=body):
                     self.assertEqual((await self.post(body, path=path, token=token)).status, status)
         res = await self.post(path="/v1/chat/completions")
         self.assertEqual(res.status, 404)
+        self.assertEqual((await res.json())["error"]["code"], "model_not_supported")
         self.assertEqual(self.calls, [])
         self.assertEqual(await self.get_events(), [])
 
@@ -157,14 +261,14 @@ class TestDecisions(LLMProxyAppTestCase):
         for headers, data, status in (({"Content-Type": "multipart/form-data; boundary=x"}, b"", 415),
                 ({"Content-Type": "text/plain"}, b"{}", 415),
                 ({"Content-Type": "application/json"}, b"{", 400)):
-            res = await self.client.post("/v1/basal", data=data,
+            res = await self.client.post("/v1/systemone", data=data,
                 headers=headers | {"Authorization": "Bearer mytoken"})
             self.assertEqual(res.status, status)
         self.app["config"]["max_json_body"] = 100
         self.assertEqual((await self.post()).status, 413)
         async def chunks():
             yield json.dumps(payload()).encode()
-        res = await self.client.post("/v1/basal", data=chunks(),
+        res = await self.client.post("/v1/systemone", data=chunks(),
             headers={"Authorization": "Bearer mytoken", "Content-Type": "application/json"})
         self.assertEqual(res.status, 413)
         self.assertEqual(self.calls, [])
@@ -228,8 +332,8 @@ class TestDecisions(LLMProxyAppTestCase):
         self.backend_config["rate_limit"] = {"rpm": 1}
         await self.insert_key("second-token", "second")
         self.assertEqual((await self.post()).status, 200)
-        self.assertEqual((await self.post(path="/v1/basal")).status, 429)
-        self.assertEqual((await self.post(path="/v1/decisions")).status, 429)
+        self.assertEqual((await self.post(path="/v1/systemone")).status, 429)
+        self.assertEqual((await self.post(path="/v1/systemone")).status, 429)
         self.assertEqual((await self.post(token="second-token")).status, 200)
         self.assertEqual(len(self.calls), 2)
 
@@ -342,7 +446,7 @@ class TestDecisionBilling(unittest.IsolatedAsyncioTestCase):
                 await billing.record(req, {"id": "test"}, {"basal/a5000/prompt": 880})
 
     def test_mongo_document_resources(self):
-        resources = {"basal-2.0-max/a5000/prompt": 880, "basal-2.0-max/a5000/completion": 0}
+        resources = {"basal-20-max/a5000/prompt": 880, "basal-20-max/a5000/completion": 0}
         user = {key: "test" for key in ("_namespace", "_user_id", "id", "_org_id", "_tier")}
         result = _billing_document(user, datetime.datetime.now(datetime.UTC), resources, uuid.uuid4())
         self.assertEqual(result["resources"], resources)
