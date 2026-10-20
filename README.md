@@ -40,25 +40,18 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `conversion` | `/v1/files/convert` |
 | `decision` | `/v1/systemone` (native), `/v1/decisions` (OpenAI Decisions subset) |
 
-Decision backends expose two formats:
+### Decision backends
 
-- `/v1/systemone` accepts the native Basal request/response
-  contract and all six native question types: `noul`, `choice`, `score`,
+- `/v1/systemone`: native Basal format; types `noul`, `choice`, `score`,
   `multi`, `act`, and `tool`.
-- `/v1/decisions` accepts a supported subset of the
-  [OpenAI Decisions beta API](https://developers.openai.com/api/docs/guides/decisions):
-  text input and `predicate`, `choice`, and `score` questions. This proxy uses
-  our configured Basal backend, not a hosted OpenAI model.
+- `/v1/decisions`: supported [OpenAI Decisions beta](https://developers.openai.com/api/docs/guides/decisions)
+  format; types `predicate`, `choice`, and `score`.
 
-The `basal` wire adapter forwards both
-formats to the backend's `/v1/systemone`. `decision_adapter = "basal"` is the
-configuration default. The public model alias is removed from the native
-backend payload. Other wire adapters remain available on the native route;
-OpenAI Decisions currently requires the Basal adapter.
+Configure `type = "decision"` and `decision_adapter = "basal"` (the default).
+Both endpoints use the configured Basal backend and share authentication,
+rate limits, billing and metrics.
 
-### OpenAI Decisions
-
-Use a Python SDK exposing `client.decisions` (tested with `openai==3.26.0`):
+Use a Python client exposing `client.decisions` (tested with `openai==3.26.0`):
 
 ```python
 from openai import OpenAI
@@ -79,32 +72,20 @@ result = client.decisions.create(
 print(result.answers[0].probability)
 ```
 
-Requests use `model`, a text-string `input`, and an ordered `questions` array.
-Question names are optional strings; unnamed answers have `name: null`.
-Answers are returned directly in `answers`, in request order. `predicate`
-returns the probability of true; `choice` preserves string/boolean values;
-`score` returns the expected zero-based level index, which may be fractional.
-The adapter does not generate conversational text or a natural-language summary.
+`/v1/decisions` accepts `model`, `input` and `questions`. Input is a string or
+user messages with text content or `input_text` parts. Text parts are joined
+with newlines, messages with blank lines. Tables can be supplied as text.
+Images, audio, files, other roles and streaming are rejected with 400.
 
-Message arrays, images, files, streaming, generation parameters, cache controls,
-`safety_identifier`, unknown fields and native-only question types return 400
-before inference. Each choice/score question requires 2-255 unique values/labels.
-Requests accept 1-400 questions, subject to configured question and branch
-limits (defaults: 16 questions and 64 branches). Each supported question counts
-as one branch. This is a supported subset of
-an OpenAI beta contract, not equivalent model calibration or refusal behavior.
+Answers preserve question order: `predicate` returns a probability, `choice`
+returns one string/boolean option, and `score` returns the expected zero-based
+level index. Choice and score questions require 2-255 unique options/labels.
+Question and branch limits default to 16 and 64; each supported question uses
+one branch. Other request parameters are rejected.
 
-Both formats share authentication, per-user/model rate limits, timeouts,
-validated billing and metrics. Usage comes from native input/output counts;
-JSON serialization adds no model tokens. Required cache/reasoning detail
-counters are zero because these tokens are not separately accounted by this
-adapter; the counters do not measure physical cache reuse. Invalid or incomplete
-backend answers fail with 502 before billing.
-
-The model catalog lists the native endpoint and, for supported adapters,
-`/v1/decisions`. `decision_capabilities.question_types` describes native types;
-`openai_question_types`, `openai_input` and `openai_streaming` describe the
-OpenAI frontend.
+Billing uses native input/output token counts. Cache and reasoning detail
+counters are zero. Invalid backend responses return 502 before billing.
+`/v1/models` exposes supported endpoints and `decision_capabilities`.
 
 A request naming a model on an endpoint of another type is rejected with 404
 and `code: model_not_supported` before inference, rate limiting and billing.

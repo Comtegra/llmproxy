@@ -1,7 +1,7 @@
 """Supported OpenAI Decisions subset translated to the Basal wire protocol.
 
-This frontend deliberately supports only text input and the three shared
-question types. It does not claim equivalent calibration across model families.
+Text and user messages containing text are translated to native Basal state.
+This frontend does not provide image inference or equivalent model calibration.
 """
 
 import json
@@ -34,6 +34,37 @@ def _text(request, value, param):
     return value
 
 
+def input_text(request, value):
+    """Join shared user evidence; do not invent role or multimodal semantics."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list) or not value:
+        raise errors.bad_request(request, "input must be text or a non-empty array of user messages.", "input")
+    messages = []
+    for i, message in enumerate(value):
+        param = "input[%d]" % i
+        _fields(request, message, ("type", "role", "content"), param)
+        if message.get("type", "message") != "message" or message.get("role") != "user":
+            raise errors.bad_request(request, "Only user messages are supported.", param)
+        content = message.get("content")
+        if isinstance(content, str):
+            messages.append(content)
+            continue
+        if not isinstance(content, list) or not content:
+            raise errors.bad_request(request, "content must be text or a non-empty array of input_text parts.",
+                param + ".content")
+        parts = []
+        for j, part in enumerate(content):
+            part_param = "%s.content[%d]" % (param, j)
+            _fields(request, part, ("type", "text"), part_param)
+            if part.get("type") != "input_text":
+                raise errors.bad_request(request,
+                    "This frontend accepts text only; images, audio and files are not supported.", part_param)
+            parts.append(_text(request, part.get("text"), part_param + ".text"))
+        messages.append("\n".join(parts))
+    return "\n\n".join(messages)
+
+
 @dataclass(frozen=True)
 class Question:
     kind: str
@@ -46,7 +77,7 @@ def prepare(request, body, backend):
     if not supports(backend):
         raise errors.bad_request(request, "This frontend requires the Basal adapter.", "model")
     _fields(request, body, ("model", "input", "questions"), "body")
-    state = _text(request, body.get("input"), "input")
+    state = input_text(request, body.get("input"))
     questions = body.get("questions")
     limit = backend.get("decision_limits", {}).get("max_questions", config.DECISION_LIMITS["max_questions"])
     if not isinstance(questions, list) or not 1 <= len(questions) <= min(limit, 400):

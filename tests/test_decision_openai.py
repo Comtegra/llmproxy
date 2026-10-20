@@ -97,6 +97,38 @@ class TestOpenAIDecisions(LLMProxyAppTestCase):
         self.assertIs(type(data["answers"][1]["choice"]), str)
         self.assertEqual(data["answers"][1]["choice"], "true")
 
+    async def test_user_messages_preserve_table_text_and_boundaries(self):
+        table = "| Item | Amount |\n| Refund | 100 |"
+        body = payload() | {"input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "Invoice:"},
+                {"type": "input_text", "text": table}]},
+            {"type": "message", "role": "user", "content": "Check the amount."}]}
+        response = await self.post(body)
+        self.assertEqual(response.status, 200, await response.text())
+        forwarded = self.backend.app["decision_calls"][0][0]
+        self.assertEqual(forwarded["state"], "Invoice:\n" + table + "\n\nCheck the amount.")
+        self.assertNotIn("media", forwarded)
+        self.assertEqual(len(await self.get_events()), 2)
+
+    async def test_images_files_audio_and_instruction_roles_are_rejected_before_inference(self):
+        inputs = [
+            [{"role": "system", "content": "Instruction"}],
+            [{"role": "assistant", "content": "History"}],
+            [{"type": "function_call", "role": "user", "content": "Call"}],
+            [{"role": "user", "content": []}],
+            [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}]}],
+            [{"role": "user", "content": [{"type": "input_file", "file_id": "file-1"}]}],
+            [{"role": "user", "content": [{"type": "input_audio", "data": "aGVsbG8="}]}],
+            [{"role": "user", "content": [{"type": "input_text", "text": "x", "unknown": True}]}],
+            [{"role": "user", "content": [{"type": "input_text", "text": None}]}]]
+        for value in inputs:
+            with self.subTest(value=value):
+                response = await self.post(payload() | {"input": value})
+                self.assertEqual(response.status, 400, await response.text())
+                self.assertEqual((await response.json())["error"]["type"], "invalid_request_error")
+        self.assertEqual(self.backend.app["decision_calls"], [])
+        self.assertEqual(await self.get_events(), [])
+
     async def test_invalid_and_unsupported_requests_never_reach_backend(self):
         cases = [payload() | delta for delta in ({"input": []}, {"input": None}, {"stream": False},
             {"safety_identifier": "user"}, {"prompt_cache_key": "cache"}, {"questions": []}, {"questions": {}},
@@ -246,4 +278,9 @@ class TestOpenAIDecisions(LLMProxyAppTestCase):
             self.assertEqual(data.usage.total_tokens, 123)
             with self.assertRaises(openai.BadRequestError):
                 await client.decisions.create(**(payload() | {"input": []}))
-        self.assertEqual(len(await self.get_events()), 2)
+            messages = payload() | {"input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "Amount,Total\nRefund,100"}]}]}
+            result = await client.decisions.create(**messages)
+            self.assertEqual(result.answers[0].probability, 0.95)
+            self.assertEqual(self.backend.app["decision_calls"][-1][0]["state"], "Amount,Total\nRefund,100")
+        self.assertEqual(len(await self.get_events()), 4)

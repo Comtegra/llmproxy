@@ -167,7 +167,7 @@ class TestDecisions(LLMProxyAppTestCase):
         self.assertEqual(item["type"], "decision")
         self.assertEqual(item["endpoints"], ["/v1/systemone", "/v1/decisions"])
         self.assertEqual(item["decision_capabilities"]["openai_question_types"], ["predicate", "choice", "score"])
-        self.assertEqual(item["decision_capabilities"]["openai_input"], "text")
+        self.assertEqual(item["decision_capabilities"]["openai_input"], "text_or_user_messages")
         self.assertFalse(item["decision_capabilities"]["openai_streaming"])
         self.assertNotIn("chat_input", item["decision_capabilities"])
         self.assertNotIn("token", item)

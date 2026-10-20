@@ -59,7 +59,9 @@ must verify the backend path, credentials, error handling and actual billed
 usage. No conditional on a model name belongs in the shared HTTP handler.
 
 `decision_openai.py` implements the supported OpenAI Decisions subset:
-text input and predicate/choice/score questions. It translates the request to
+text strings or user messages with text and predicate/choice/score questions.
+Text parts become the shared native state; non-user roles and media are
+rejected rather than silently flattened or ignored. It translates the request to
 Basal's native wire format and translates validated answers back to the public
 Decisions schema before billing. It explicitly checks that the selected wire
 adapter is Basal; adding a new engine to the internal registry does not imply

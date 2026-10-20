@@ -127,7 +127,7 @@ def model_items(cfg):
                 item["endpoints"].append(decision_openai.PATH)
                 item["decision_capabilities"].update(
                     openai_question_types=list(decision_openai.QUESTION_TYPES),
-                    openai_input="text", openai_streaming=False)
+                    openai_input="text_or_user_messages", openai_streaming=False)
         item.update(budget.catalog(cfg, meta))
         items.append(item)
     return items
