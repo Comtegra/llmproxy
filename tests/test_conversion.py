@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import aiohttp
+import aiohttp.test_utils
 
 from llmproxy import config, conversion_id, files, metrics
 from llmproxy.app import reload_config
@@ -135,7 +136,7 @@ class TestConversionId(unittest.TestCase):
         self.assertIsNone(conversion_id.parse(job_id))
 
 
-class TestBackgroundConversion(LLMProxyAppTestCase):
+class ConversionTestCase(LLMProxyAppTestCase):
     AUTH = {"Authorization": "Bearer mytoken"}
 
     async def submit(self, background="true", headers=None, **fields):
@@ -166,6 +167,8 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
     def backend_calls(self):
         return list(self.backend.app["paths"])
 
+
+class TestBackgroundConversion(ConversionTestCase):
     async def test_submit_answers_202_with_id_and_bills_nothing(self):
         status, headers, data = await self.submit(_pages="5")
 
@@ -517,6 +520,34 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         for part in (job_id, "backend_request_id=%s" % rid, "pages=7",
                 "api_key_id=myuser", "model=mymarker"):
             self.assertIn(part, line)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_missing_text_is_refused_before_the_claim(self):
+        job_id = await self.queued(_no_text="1")
+
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.poll(job_id)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(self.backend.app["marker_claims"], [])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_claim_only_counts_as_a_200(self):
+        # A boolean in a non-200 answer (or in an answer too large for a
+        # one-field object) is not a claim.
+        job_id = await self.queued(_pages="2")
+        control = self.backend.app["marker_control"]
+        cases = [(status, {"delivery_claimed": True})
+            for status in (201, 202, 409, 404, 500)]
+        cases.append((200, {"delivery_claimed": True, "pad": "x" * 70000}))
+        for status, body in cases:
+            with self.subTest(status=status, size=len(json.dumps(body))):
+                control["claim_status"] = status
+                control["claim_body"] = body
+                with self.assertLogs(self.app.logger, level="ERROR"):
+                    code, _, data = await self.poll(job_id)
+                self.assertEqual(code, 502)
+                self.assertNotIn("hello", str(data))
         self.assertListEqual(await self.get_events(), [])
 
     async def test_backend_errors_on_poll(self):
@@ -883,7 +914,58 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertEqual(status, 502)
 
 
+class _ServerAsDeployed(aiohttp.test_utils.TestServer):
+    # aiohttp's test server cancels a handler whose client disconnects; the
+    # proxy runs with handler_cancellation=False (app.main), where the
+    # handler keeps running and sees the disconnect as an OSError instead.
+    async def _make_runner(self, **kwargs):
+        kwargs["handler_cancellation"] = False
+        return await super()._make_runner(**kwargs)
+
+
+class TestBackgroundConversionAsDeployed(ConversionTestCase):
+    """The disconnect cases under the proxy's real handler settings."""
+
+    async def get_server(self, app):
+        return _ServerAsDeployed(app, loop=self.loop)
+
+    async def test_disconnect_while_writing_the_result(self):
+        # The client goes away mid-result: no error, the slot is released and
+        # the pickup was billed once (the next poll returns it unbilled).
+        self.app["config"]["timeout_read"] = 10
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        with self.assertNoLogs(level="ERROR"):
+            reader, writer = await asyncio.open_connection(self.server.host,
+                self.server.port)
+            writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\n"
+                "Host: test\r\nAuthorization: Bearer mytoken\r\n\r\n"
+                % job_id).encode())
+            await writer.drain()
+            self.assertEqual(len(await self.get_events(expect=1)), 1)
+            await asyncio.sleep(0.2)
+            self.assertEqual(files._polls_in_flight, {"myuser": 1})
+            writer.close()
+            for _ in range(500):
+                if not files._polls_in_flight:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(files._polls_in_flight, {})
+
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(await self.get_events()), 1)
+
+
 class TestFilesConfig(unittest.TestCase):
+    def test_default_poll_response_limit(self):
+        # The default bounds the memory a key's polls may hold (a few copies
+        # of the result per slot, times max_polls_in_flight): 128 MiB, as
+        # documented in README and config.toml.
+        self.assertEqual(files.DEFAULT_MAX_POLL_RESPONSE_BYTES,
+            128 * 1024 ** 2)
+
     def test_files_options(self):
         config.validate({"files": {"max_polls_in_flight": 2,
             "max_poll_response_bytes": 1024}})

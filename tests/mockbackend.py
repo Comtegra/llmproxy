@@ -272,7 +272,8 @@ def _marker_queue(req, post):
     play a broken backend) / `_omit_page_count` as for the sync path;
     `_claim_raw` = JSON sent as delivery_claimed instead of the one-time bool;
     `_request_id_raw` = JSON sent as request_id (nothing is queued); `_text` =
-    the converted text, `_text_size` = that many "x" instead.
+    the converted text, `_text_size` = that many "x" instead, `_no_text` =
+    a completed answer without the text.
     """
     if (raw := post.get("_request_id_raw")) is not None:
         return aiohttp.web.json_response({"success": True,
@@ -288,6 +289,7 @@ def _marker_queue(req, post):
         "output_format": post.get("output_format", "markdown"),
         "text": "x" * int(post["_text_size"]) if "_text_size" in post
             else post.get("_text", "# Converted\n\nhello"),
+        "no_text": bool(post.get("_no_text")),
         "claimed": False,
     }
     return aiohttp.web.json_response({
@@ -328,6 +330,8 @@ async def marker_poll(req):
         key: job["text"], "images": {"a.png": "aGk="},
         "output_format": job["output_format"],
         "provenance": {"ai_generated": True}}
+    if job["no_text"]:
+        del payload[key]
     if job["pages"] is not None:
         payload["page_count"] = job["pages"]
     return aiohttp.web.json_response(payload,
@@ -342,7 +346,8 @@ async def marker_claim(req):
     if delay := control.get("claim_delay"):
         await asyncio.sleep(delay)
     if (status := control.get("claim_status")) is not None:
-        return aiohttp.web.json_response({"error": "boom"}, status=status)
+        return aiohttp.web.json_response(
+            control.get("claim_body", {"error": "boom"}), status=status)
 
     job = req.app["marker_jobs"].get(req.match_info["request_id"])
     if job is None or job["no_claim"]:
