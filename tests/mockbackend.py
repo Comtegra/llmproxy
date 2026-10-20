@@ -263,17 +263,25 @@ def _marker_queue(req, post):
 
     Form controls: `_polls` = polls answered "processing" before the job is
     done; `_poll_fail` = the conversion fails; `_no_claim` = a backend that
-    does not report delivery_claimed; `_pages` / `_omit_page_count` as for
-    the sync path.
+    does not report delivery_claimed; `_pages` (JSON, so 0/true/1.5/"3"
+    play a broken backend) / `_omit_page_count` as for the sync path;
+    `_claim_raw` = JSON sent as delivery_claimed instead of the one-time bool;
+    `_request_id_raw` = JSON sent as request_id (nothing is queued); `_text` =
+    the converted text.
     """
+    if (raw := post.get("_request_id_raw")) is not None:
+        return aiohttp.web.json_response({"success": True,
+            "request_id": json.loads(raw)})
     rid = secrets.token_hex(16)
     req.app["marker_jobs"][rid] = {
         "remaining": int(post.get("_polls", "0")),
         "fail": bool(post.get("_poll_fail")),
         "no_claim": bool(post.get("_no_claim")),
+        "claim_raw": post.get("_claim_raw"),
         "pages": None if post.get("_omit_page_count")
-            else int(post.get("_pages", "1")),
+            else json.loads(post.get("_pages", "1")),
         "output_format": post.get("output_format", "markdown"),
+        "text": post.get("_text", "# Converted\n\nhello"),
         "claimed": False,
     }
     return aiohttp.web.json_response({
@@ -309,7 +317,7 @@ async def marker_poll(req):
     if key in MARKER_RESERVED_KEYS:
         key = "markdown"
     payload = {"status": "complete", "success": True,
-        key: "# Converted\n\nhello", "images": {"a.png": "aGk="},
+        key: job["text"], "images": {"a.png": "aGk="},
         "output_format": job["output_format"],
         "provenance": {"ai_generated": True}}
     if job["pages"] is not None:
@@ -317,6 +325,8 @@ async def marker_poll(req):
     if req.headers.get("X-Delivery-Claim") == "true" and not job["no_claim"]:
         payload["delivery_claimed"] = not job["claimed"]
         job["claimed"] = True
+        if job["claim_raw"] is not None:
+            payload["delivery_claimed"] = json.loads(job["claim_raw"])
     return aiohttp.web.json_response(payload,
         headers={"X-AI-Processed": "true"})
 
