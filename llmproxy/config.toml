@@ -52,7 +52,7 @@ http_origin = "*"
 # the backend larger than max_poll_response_bytes is a 502. Reloaded on SIGHUP.
 #[files]
 #max_polls_in_flight = 4
-#max_poll_response_bytes = 536870912  # 512 MiB (Markdown + base64 images)
+#max_poll_response_bytes = 134217728  # 128 MiB (Markdown + base64 images)
 
 # EU AI Act Art. 50(2) provenance marking. Generative responses (chat,
 # completions, messages, responses) carry an "X-AI-Generated: true" header;

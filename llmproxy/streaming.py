@@ -74,6 +74,20 @@ async def drain(read_block, write_block, on_chunk, on_disconnect=None,
                 on_disconnect(e)
 
 
+def set_prepared_headers(f_req, f_res):
+    """Set the headers the middlewares add, on a response the handler prepares.
+
+    A response prepared before the handler returns is past
+    add_request_id_header and add_cors_headers, so X-Request-ID and CORS must
+    be on it before prepare().
+    """
+    f_res.headers["X-Request-ID"] = str(f_req["request_id"])
+    f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    f_res.headers["Access-Control-Expose-Headers"] = EXPOSE_HEADERS
+    if o := f_req.app["config"].get("http_origin"):
+        f_res.headers["Access-Control-Allow-Origin"] = o
+
+
 async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     """Wire a chunked backend response to the client, invoking ``on_chunk`` for
     every SSE block (including during the post-disconnect drain). Returns the
@@ -94,11 +108,7 @@ async def stream_through(f_req, b_res, on_chunk, extra_headers=None):
     if extra_headers:
         headers.update(extra_headers)
     f_res = aiohttp.web.StreamResponse(headers=headers)
-
-    f_res.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    f_res.headers["Access-Control-Expose-Headers"] = EXPOSE_HEADERS
-    if o := app["config"].get("http_origin"):
-        f_res.headers["Access-Control-Allow-Origin"] = o
+    set_prepared_headers(f_req, f_res)
 
     # Prepare (flush) response headers. If the client is already gone, prepare()
     # raises OSError — but we still MUST drain the backend to capture usage, so

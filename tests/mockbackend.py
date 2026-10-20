@@ -272,7 +272,7 @@ def _marker_queue(req, post):
     play a broken backend) / `_omit_page_count` as for the sync path;
     `_claim_raw` = JSON sent as delivery_claimed instead of the one-time bool;
     `_request_id_raw` = JSON sent as request_id (nothing is queued); `_text` =
-    the converted text.
+    the converted text, `_text_size` = that many "x" instead.
     """
     if (raw := post.get("_request_id_raw")) is not None:
         return aiohttp.web.json_response({"success": True,
@@ -286,7 +286,8 @@ def _marker_queue(req, post):
         "pages": None if post.get("_omit_page_count")
             else json.loads(post.get("_pages", "1")),
         "output_format": post.get("output_format", "markdown"),
-        "text": post.get("_text", "# Converted\n\nhello"),
+        "text": "x" * int(post["_text_size"]) if "_text_size" in post
+            else post.get("_text", "# Converted\n\nhello"),
         "claimed": False,
     }
     return aiohttp.web.json_response({

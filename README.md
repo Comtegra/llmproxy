@@ -157,7 +157,7 @@ is a `400`.
   the backend after the `202`: the number of jobs a key can queue is bounded
   by `rpm`. Polls have a limit of their own: each API key may
   have at most 4 polls in flight (more get `429` with `Retry-After`), and a
-  backend answer over 512 MiB is a `502`. Both are set in `[files]`
+  backend answer over 128 MiB is a `502`. Both are set in `[files]`
   (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.
 * **Upgrading:** the backend must support background conversions
   (file-processor with `background` and delivery claims). Deploy it before

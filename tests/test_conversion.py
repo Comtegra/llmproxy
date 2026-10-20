@@ -704,6 +704,59 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertEqual(data["output"], "x" * 500)
 
 
+    async def test_client_that_does_not_read_keeps_its_slot(self):
+        # The result is written inside the poll's slot: a client that never
+        # reads it keeps holding the slot (and the result in memory), so it
+        # cannot pile up one result after another.
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        reader, writer = await asyncio.open_connection(self.server.host,
+            self.server.port)
+        writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\nHost: test\r\n"
+            "Authorization: Bearer mytoken\r\n\r\n" % job_id).encode())
+        await writer.drain()
+        try:
+            # Billed right before the result is written.
+            self.assertEqual(len(await self.get_events(expect=1)), 1)
+            await asyncio.sleep(0.3)
+            self.assertEqual(files._polls_in_flight, {"myuser": 1})
+            status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 429, data)
+        finally:
+            writer.close()
+
+        for _ in range(500):
+            if not files._polls_in_flight:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(files._polls_in_flight, {})
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["output"]), size)
+        self.assertEqual(len(await self.get_events()), 1)
+
+    async def test_result_response_headers(self):
+        # Written by the handler itself, the result still carries what the
+        # middlewares add to other responses.
+        self.app["config"]["http_origin"] = "https://app.example"
+        job_id = await self.queued()
+
+        status, headers, data = await self.poll(job_id)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"],
+            "application/json; charset=utf-8")
+        self.assertEqual(int(headers["Content-Length"]),
+            len(json.dumps(data).encode()))
+        self.assertIn("X-Request-ID", headers)
+        self.assertEqual(headers["Access-Control-Allow-Origin"],
+            "https://app.example")
+        self.assertIn("Retry-After", headers["Access-Control-Expose-Headers"])
+        self.assertEqual(headers["X-AI-Generated"], "true")
+
+
 class TestFilesConfig(unittest.TestCase):
     def test_files_options(self):
         config.validate({"files": {"max_polls_in_flight": 2,

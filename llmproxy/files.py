@@ -5,7 +5,9 @@ import json
 import aiohttp
 import yarl
 
-from . import auth, billing, conversion_id, errors, metrics, provenance, proxy
+from . import (
+    auth, billing, conversion_id, errors, metrics, provenance, proxy, streaming,
+)
 
 
 # Marker Datalab-compat path (PDF -> Markdown). Not path-preserving:
@@ -30,8 +32,9 @@ CLAIM_HEADER = "X-Delivery-Claim"
 DEFAULT_MAX_POLLS_IN_FLIGHT = 4
 
 # Largest poll answer read from the backend ([files] max_poll_response_bytes):
-# a completed result carries the Markdown and base64 images.
-DEFAULT_MAX_POLL_RESPONSE_BYTES = 512 * 1024 ** 2
+# a completed result carries the Markdown and base64 images. A poll holds a
+# few copies of it while decoding and re-encoding, times the polls in flight.
+DEFAULT_MAX_POLL_RESPONSE_BYTES = 128 * 1024 ** 2
 
 # API key id -> polls in flight. Process-local like the rate-limit counters.
 _polls_in_flight = {}
@@ -454,9 +457,7 @@ async def _completed(f_req, user, b_name, product, parsed, job, data,
     if "provenance" in data:
         result["provenance"] = data["provenance"]
     # Serialized off the event loop for the same reason as it was decoded.
-    f_res = aiohttp.web.Response(
-        text=await asyncio.to_thread(json.dumps, result),
-        content_type="application/json", headers=ai_headers)
+    body = (await asyncio.to_thread(json.dumps, result)).encode()
 
     if claimed:
         await billing.record(f_req, user, {product: pages})
@@ -468,4 +469,26 @@ async def _completed(f_req, user, b_name, product, parsed, job, data,
         "backend_request_id=%s pages=%d billed=%s",
         job["id"], f_req["request_id"], parsed.request_id, pages, claimed)
 
+    return await _send_in_slot(f_req, body, ai_headers)
+
+
+async def _send_in_slot(f_req, body, headers):
+    """Write the result out before the poll's slot is released.
+
+    A Response returned by the handler is written after the handler -- and
+    the slot -- is gone: a client that never reads would pile results up in
+    memory while its slots stay free for more polls. Sending here keeps every
+    result being written inside one of the key's slots.
+    """
+    f_res = aiohttp.web.StreamResponse(headers=headers)
+    f_res.content_type = "application/json"
+    f_res.charset = "utf-8"
+    f_res.content_length = len(body)
+    streaming.set_prepared_headers(f_req, f_res)
+    try:
+        await f_res.prepare(f_req)
+        await f_res.write(body)
+        await f_res.write_eof()
+    except OSError as e:
+        f_req.app.logger.info("Client disconnected: %s", e)
     return f_res
