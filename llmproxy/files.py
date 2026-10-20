@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import json
 
@@ -38,7 +37,9 @@ DEFAULT_MAX_POLLS_IN_FLIGHT = 4
 
 # Largest poll answer read from the backend ([files] max_poll_response_bytes):
 # a completed result carries the Markdown and base64 images. A poll holds a
-# few copies of it while decoding and re-encoding, times the polls in flight.
+# few copies of it while decoding and re-encoding, times the polls in flight,
+# and decoding it blocks the event loop of the single worker (a thread would
+# not help, json holds the GIL): this limit is what bounds both.
 DEFAULT_MAX_POLL_RESPONSE_BYTES = 128 * 1024 ** 2
 
 # API key id -> polls in flight. Process-local like the rate-limit counters.
@@ -134,13 +135,9 @@ def _decode_json(body):
         return _INVALID_JSON
 
 
-async def _backend_json(f_req, b_name, body):
-    """Decode a backend answer, or raise 502.
-
-    Off the event loop: a completed result can be hundreds of MB of Markdown
-    and base64 images, and the proxy serves everybody from one worker.
-    """
-    data = await asyncio.to_thread(_decode_json, body)
+def _backend_json(f_req, b_name, body):
+    """Decode a backend answer, or raise 502."""
+    data = _decode_json(body)
     if data is _INVALID_JSON:
         f_req.app.logger.error(
             "File-convert backend %s returned invalid JSON: request_id=%s",
@@ -220,7 +217,7 @@ async def convert(f_req):
             request_id=f_req["request_id"])
 
         body = await b_res.content.read()
-        data = await _backend_json(f_req, b_name, body)
+        data = _backend_json(f_req, b_name, body)
 
         # Datalab Marker returns HTTP 200 even on conversion failure, with
         # success=false. Do not bill those.
@@ -377,7 +374,7 @@ async def _poll(f_req, user, job_id, parsed, b_name, b_cfg):
                     text="File conversion backend answer too large")
             ai_headers = _ai_headers(app, b_res)
 
-    data = await _backend_json(f_req, b_name, body)
+    data = _backend_json(f_req, b_name, body)
     if not isinstance(data, dict):
         app.logger.error(
             "File-convert backend %s returned a poll answer that is not a "
@@ -442,8 +439,7 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data,
         "page_count": pages, "images": data.get("images", {})}
     if "provenance" in data:
         result["provenance"] = data["provenance"]
-    # Serialized off the event loop for the same reason as it was decoded.
-    body = (await asyncio.to_thread(json.dumps, result)).encode()
+    body = json.dumps(result).encode()
 
     claimed = await _claim(f_req, b_name, b_cfg, parsed, job["id"])
     if claimed:
