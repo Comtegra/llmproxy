@@ -794,6 +794,34 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertEqual(headers["X-AI-Generated"], "true")
 
 
+    async def test_files_limits_reload_on_sighup(self):
+        job_id = await self.queued(_polls="10")
+        self.backend.app["marker_control"]["poll_delay"] = 0.3
+        self.app["config"]["_path"] = "unused-test-path"
+
+        def reload(files_cfg):
+            cfg = copy.deepcopy(self.app["config"])
+            cfg.pop("files", None)
+            if files_cfg is not None:
+                cfg["files"] = files_cfg
+            with mock.patch("llmproxy.config.load", return_value=cfg):
+                reload_config(self.app)
+
+        for files_cfg, allowed in (({"max_polls_in_flight": 1}, 1),
+                (None, files.DEFAULT_MAX_POLLS_IN_FLIGHT)):
+            with self.subTest(files=files_cfg):
+                reload(files_cfg)
+                results = await asyncio.gather(
+                    *(self.poll(job_id) for _ in range(allowed + 1)))
+                self.assertEqual(sorted(r[0] for r in results),
+                    [200] * allowed + [429])
+
+        reload({"max_poll_response_bytes": 20})  # even "processing" is more
+        del self.backend.app["marker_control"]["poll_delay"]
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 502)
+
+
 class TestFilesConfig(unittest.TestCase):
     def test_files_options(self):
         config.validate({"files": {"max_polls_in_flight": 2,
