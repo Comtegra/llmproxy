@@ -181,6 +181,10 @@ async def create_app(cfg):
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
         aiohttp.web.post("/v1/files/convert", files.convert),
+        # No HEAD: a poll may claim and bill the result, which a HEAD (no
+        # body) must not do.
+        aiohttp.web.get("/v1/files/convert/{id}", files.conversion,
+            allow_head=False),
         aiohttp.web.post("/v1/messages", messages.messages),
         aiohttp.web.post("/v1/responses", responses.responses),
     ]
