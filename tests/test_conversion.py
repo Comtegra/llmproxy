@@ -497,6 +497,28 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
             {"product": "mymarker/none/conversion", "quantity": 2},
         ])
 
+    async def test_claim_without_answer_logs_outcome_unknown(self):
+        # The claim may have been granted without the proxy hearing of it:
+        # 504, and a log line with what is needed to bill the pages by hand.
+        # The claim waits timeout_read (1 s in tests), not the backend's long
+        # timeout meant for synchronous conversions.
+        self.app["config"]["backends"]["mymarker"]["timeout"] = 30
+        job_id = await self.queued(_pages="7")
+        rid = conversion_id.parse(job_id).request_id
+        self.backend.app["marker_control"]["claim_delay"] = 1.5
+
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 504)
+        self.assertNotIn("hello", str(data))
+        line = next(line for line in logs.output
+            if "Delivery claim outcome unknown" in line)
+        for part in (job_id, "backend_request_id=%s" % rid, "pages=7",
+                "api_key_id=myuser", "model=mymarker"):
+            self.assertIn(part, line)
+        self.assertListEqual(await self.get_events(), [])
+
     async def test_backend_errors_on_poll(self):
         job_id = await self.queued()
         control = self.backend.app["marker_control"]

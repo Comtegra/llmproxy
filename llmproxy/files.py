@@ -453,7 +453,8 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
         result["provenance"] = data["provenance"]
     body = json.dumps(result).encode()
 
-    claimed = await _claim(f_req, b_name, b_cfg, parsed, job["id"])
+    claimed = await _claim(f_req, user, b_name, b_cfg, parsed, job["id"],
+        pages)
     if claimed:
         await billing.record(f_req, user, {product: pages})
         app.logger.info("Client used: %d page(s) of %s", pages, b_name)
@@ -467,13 +468,17 @@ async def _completed(f_req, user, b_name, b_cfg, product, parsed, job, data):
     return body
 
 
-async def _claim(f_req, b_name, b_cfg, parsed, job_id):
+async def _claim(f_req, user, b_name, b_cfg, parsed, job_id, pages):
     """Claim the delivery of a completed job; True for its first pickup only.
 
     Anything but a 200 with a boolean (409: not completed after all, 404: the
     job is gone or the backend has no claims) is a 502 without the result:
     without the claim the proxy cannot tell the first pickup from the tenth,
     and billing every poll overcharges while billing none gives it away.
+
+    A claim that fails without an answer (timeout, lost connection) may have
+    been granted all the same: then the first pickup is spent and these pages
+    are never billed. Logged with everything needed to bill them by hand.
     """
     app = f_req.app
 
@@ -485,16 +490,25 @@ async def _claim(f_req, b_name, b_cfg, parsed, job_id):
         connect=app["config"]["timeout_connect"],
         sock_read=app["config"]["timeout_read"])
 
-    with proxy.backend_errors(f_req, b_name) as b_start:
-        async with app["client"].post(b_url, headers=b_hdrs, ssl=ssl,
-                timeout=timeout) as b_res:
-            proxy.observe_backend_response(b_name, b_res, b_start)
-            try:
-                body = await proxy.read_limited(b_res,
-                    _MAX_CLAIM_RESPONSE_BYTES)
-            except ValueError:
-                body = b""
-            status = b_res.status
+    try:
+        with proxy.backend_errors(f_req, b_name) as b_start:
+            async with app["client"].post(b_url, headers=b_hdrs, ssl=ssl,
+                    timeout=timeout) as b_res:
+                proxy.observe_backend_response(b_name, b_res, b_start)
+                try:
+                    body = await proxy.read_limited(b_res,
+                        _MAX_CLAIM_RESPONSE_BYTES)
+                except ValueError:
+                    body = b""
+                status = b_res.status
+    except (aiohttp.web.HTTPException, asyncio.CancelledError):
+        app.logger.error(
+            "Delivery claim outcome unknown (if the backend granted it, these "
+            "pages were not billed): id=%s model=%s backend_request_id=%s "
+            "pages=%d api_key_id=%s request_id=%s",
+            job_id, b_name, parsed.request_id, pages, user["id"],
+            f_req["request_id"])
+        raise
 
     data = _decode_json(body) if status == 200 else None
     claimed = data.get("delivery_claimed") if isinstance(data, dict) else None

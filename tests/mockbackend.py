@@ -339,6 +339,8 @@ async def marker_claim(req):
     job; 409 while it is not completed; 404 for an unknown job."""
     req.app["marker_claims"].append(dict(req.headers))
     control = req.app["marker_control"]
+    if delay := control.get("claim_delay"):
+        await asyncio.sleep(delay)
     if (status := control.get("claim_status")) is not None:
         return aiohttp.web.json_response({"error": "boom"}, status=status)
 
