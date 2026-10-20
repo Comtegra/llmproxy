@@ -56,7 +56,9 @@ _polls_in_flight = {}
 _BACKGROUND = {"true": True, "1": True, "false": False, "0": False}
 
 # Fields of the backend's poll response the converted text can never be
-# stored under (mirrors the backend's choice of the content key).
+# stored under (mirrors the backend's choice of the content key). A copy of
+# _RESERVED_KEYS in the file-processor's app/api/datalab_compat.py: change
+# both together, or a client choosing such an output_format gets a 502.
 _RESERVED_KEYS = frozenset({"status", "success", "images", "page_count",
     "output_format", "provenance", "delivery_claimed", "error_code", "error",
     "request_id"})

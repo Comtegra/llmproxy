@@ -706,6 +706,16 @@ class TestBackgroundConversion(ConversionTestCase):
                 self.assertNotIn("Location", headers)
         self.assertListEqual(await self.get_events(), [])
 
+    def test_reserved_keys_match_the_file_processor(self):
+        # Pinned on purpose: the set must equal _RESERVED_KEYS in the
+        # file-processor's app/api/datalab_compat.py (provenance.FIELD is
+        # "provenance"). A change here without the same change there makes
+        # the proxy look for the text under another key than the backend
+        # stored it -- change both, then this test.
+        self.assertEqual(files._RESERVED_KEYS, frozenset({"status",
+            "success", "images", "page_count", "output_format", "error",
+            "error_code", "request_id", "delivery_claimed", "provenance"}))
+
     async def test_reserved_output_formats_never_shadow_the_text(self):
         # Literal copy of file-processor's _RESERVED_KEYS (datalab_compat.py),
         # independent of both the proxy's and the mock's sets: a key missing
