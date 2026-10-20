@@ -152,7 +152,10 @@ is a `400`.
   backend and its job id, signed with a key derived from the backend's
   `token`. Changing that token invalidates the ids of open conversions.
 * **Rate limits:** polls do not count against the model's `rpm` or
-  `concurrency` limits; only the submission does. Instead each API key may
+  `concurrency` limits; only the submission does. For a background
+  submission `concurrency` bounds only the upload, not the jobs waiting on
+  the backend after the `202`: the number of jobs a key can queue is bounded
+  by `rpm`. Polls have a limit of their own: each API key may
   have at most 4 polls in flight (more get `429` with `Retry-After`), and a
   backend answer over 512 MiB is a `502`. Both are set in `[files]`
   (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.

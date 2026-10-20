@@ -44,7 +44,10 @@ http_origin = "*"
 #concurrency = 5
 
 # Polling background file conversions (GET /v1/files/convert/{id}). Polls do
-# not count against rpm/concurrency; instead each API key may have at most
+# not count against rpm/concurrency, and for a background submission
+# (background=true) concurrency only bounds the upload: the job stays queued
+# on the backend after the 202, so only rpm bounds how many jobs a key queues.
+# Polls have a limit of their own: each API key may have at most
 # max_polls_in_flight polls in flight (more get 429), and a poll answer from
 # the backend larger than max_poll_response_bytes is a 502. Reloaded on SIGHUP.
 #[files]
