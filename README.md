@@ -80,6 +80,84 @@ pkill -f -HUP 'python3? .*llmproxy'
 docker kill -s=SIGHUP CONTAINER
 ```
 
+## File conversion (PDF to Markdown)
+
+`POST /v1/files/convert` (multipart: `file`, `model`, optional
+`output_format`) converts a PDF with a `conversion` backend (the marker
+microservice) and bills `MODEL/DEVICE/conversion` per page. A `conversion`
+backend must have a non-empty `token`.
+
+By default the request is synchronous: the response arrives when the
+conversion is done, which can take minutes. With `background=true` the proxy
+answers as soon as the job is queued and the client polls for the result, so
+an agent does not have to hold a connection open for the whole conversion:
+
+```sh
+curl -s -i https://llm.example.com/v1/files/convert \
+  -H "Authorization: Bearer $KEY" \
+  -F model=pdf-to-markdown -F background=true -F file=@document.pdf
+# HTTP/1.1 202 Accepted
+# Location: /v1/files/convert/fc_WyJwZGYt...
+# Retry-After: 5
+# {"id": "fc_WyJwZGYt...", "object": "file.conversion",
+#  "model": "pdf-to-markdown", "status": "queued"}
+
+curl -s https://llm.example.com/v1/files/convert/fc_WyJwZGYt... \
+  -H "Authorization: Bearer $KEY"
+```
+
+```python
+import time
+import requests
+
+API = "https://llm.example.com/v1/files/convert"
+AUTH = {"Authorization": "Bearer YOUR-API-SECRET"}
+
+with open("document.pdf", "rb") as f:
+    res = requests.post(API, headers=AUTH,
+        files={"file": ("document.pdf", f, "application/pdf")},
+        data={"model": "pdf-to-markdown", "background": "true"})
+res.raise_for_status()
+job = res.json()
+
+while job["status"] in ("queued", "in_progress"):
+    time.sleep(int(res.headers.get("Retry-After", "5")))
+    res = requests.get("%s/%s" % (API, job["id"]), headers=AUTH)
+    res.raise_for_status()
+    job = res.json()
+
+if job["status"] == "completed":
+    print(job["output"])  # same fields as the synchronous response
+else:
+    print("failed:", job["error"]["message"])
+```
+
+`GET /v1/files/convert/{id}` answers `200` with `status` `in_progress`
+(with `Retry-After`), `completed` (`output`, `output_format`, `page_count`,
+`images`, `provenance` when the backend sends it) or `failed` (`error`,
+not billed). `background` accepts `true`/`false` (or `1`/`0`); anything else
+is a `400`.
+
+* **Billing:** the pages are billed when a completed result is picked up for
+  the first time; later polls return the same result unbilled. Nothing is
+  billed at submission or for a failed conversion. The backend reports the
+  first pickup exactly once per job, so this holds across repeated or
+  concurrent polls, proxy restarts and replicas. A result the proxy cannot
+  bill (no valid `page_count`, a backend without delivery claims) is never
+  handed out: the poll is a `502`.
+* **Access:** the id is bound to the API key that submitted the conversion;
+  any other key, a modified id, or a job the backend no longer keeps (results
+  expire with the backend's retention, 7 days by default) gets `404` with
+  `code: conversion_not_found`. The proxy keeps no state: the id carries the
+  backend and its job id, signed with a key derived from the backend's
+  `token`. Changing that token invalidates the ids of open conversions.
+* **Rate limits:** polls do not count against the model's `rpm` or
+  `concurrency` limits; only the submission does.
+* **Upgrading:** the backend must support background conversions
+  (file-processor with `background` and delivery claims). Deploy it before
+  the proxy; with an older backend synchronous requests keep working and
+  `background=true` is a `502`.
+
 ## Monitoring (Prometheus metrics)
 
 The proxy exposes Prometheus-compatible metrics at `/metrics` by default.
@@ -434,7 +512,9 @@ Endpoint coverage:
   byte-for-byte.
 * `/v1/files/convert` -- header only. Converted Markdown is derived from the
   uploaded PDF; Marker's JSON body (including any provenance object) is
-  forwarded unchanged.
+  forwarded unchanged. The same holds for a completed background conversion
+  picked up through `GET /v1/files/convert/{id}` (Marker's provenance object
+  is passed through as the `provenance` field).
 * `/v1/embeddings`, `/v1/models`, error responses -- never marked: vectors,
   metadata and errors are not synthetic content.
 

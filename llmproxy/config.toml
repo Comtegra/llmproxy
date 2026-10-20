@@ -172,6 +172,8 @@ uri = "sqlite://db.sqlite"
 # it with form field model=pdf-to-markdown. Billed as one-off
 # pdf-to-markdown/<device>/conversion (quantity = page_count from Marker).
 # Put the microservice APP_TOKEN in token= below (do not commit secrets).
+# token is required: it also signs the ids of background conversions
+# (background=true), so changing it invalidates the ids still open.
 #[backends.pdf-to-markdown]
 #url = "https://marker-microservice.apps.cgc-krk-01.comtegra.cloud"
 #token = "APP_TOKEN"
