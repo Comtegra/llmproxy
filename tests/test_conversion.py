@@ -180,6 +180,10 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         self.assertEqual(headers["Retry-After"], "5")
         self.assertIn("X-Request-ID", headers)
         self.assertNotIn("X-AI-Generated", headers)
+        # Browser clients can read where and when to poll.
+        exposed = {h.strip() for h in
+            headers["Access-Control-Expose-Headers"].split(",")}
+        self.assertLessEqual({"Location", "Retry-After"}, exposed)
         self.assertListEqual(await self.get_events(), [])
 
         form = self.backend.app["marker_forms"][-1]
