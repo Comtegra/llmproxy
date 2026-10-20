@@ -81,6 +81,12 @@ def validate(cfg):
             if "timeout" in meta and (type(meta["timeout"]) not in (int, float)
                     or not math.isfinite(meta["timeout"]) or meta["timeout"] <= 0):
                 raise ConfigError('Backend "%s" timeout must be finite and positive' % name)
+        if meta["type"] == "conversion":
+            # Besides authenticating the proxy to the backend, the token keys
+            # the signature of background conversion ids (conversion_id.py):
+            # with an empty one anybody could mint an id for any job.
+            if type(meta.get("token")) is not str or not meta["token"].strip():
+                raise ConfigError('Backend "%s" token must be a non-empty string' % name)
         if "decision_limits" in meta:
             limits = meta["decision_limits"]
             if meta["type"] != "decision" or type(limits) is not dict:
