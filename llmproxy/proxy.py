@@ -202,15 +202,14 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
                 d.add_field(key, value)
         b_body = d
 
-    try:
-        app.logger.debug("Sending backend request")
-        ssl = None if b_cfg.get("verify_ssl", True) else False
-        # Per-backend response timeout overrides the global sock_read (e.g. audio
-        # transcription is silent for minutes; the global timeout would 504 it).
-        timeout = aiohttp.ClientTimeout(
-            connect=app["config"]["timeout_connect"],
-            sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
-        b_start = time.monotonic()
+    app.logger.debug("Sending backend request")
+    ssl = None if b_cfg.get("verify_ssl", True) else False
+    # Per-backend response timeout overrides the global sock_read (e.g. audio
+    # transcription is silent for minutes; the global timeout would 504 it).
+    timeout = aiohttp.ClientTimeout(
+        connect=app["config"]["timeout_connect"],
+        sock_read=b_cfg.get("timeout", app["config"]["timeout_read"]))
+    with backend_errors(f_req, b_name) as b_start:
         async with ratelimit.slot(f_req, user, b_name, b_cfg):
             # Per-user visibility, inside the slot: a 429 never reaches the
             # backend, so it must not count as that user's model usage. The
@@ -219,11 +218,31 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
                 async with app["client"].post(
                         b_url, headers=b_hdrs, data=b_body, ssl=ssl,
                         timeout=timeout) as b_res:
-                    metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
-                        time.monotonic() - b_start)
-                    metrics.BACKEND_REQUESTS_TOTAL.labels(
-                        b_name, str(b_res.status)).inc()
+                    observe_backend_response(b_name, b_res, b_start)
                     yield b_res, b_name, b_cfg
+
+
+def observe_backend_response(b_name, b_res, b_start):
+    """Record latency and status of a backend response (headers received)."""
+    metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
+        time.monotonic() - b_start)
+    metrics.BACKEND_REQUESTS_TOTAL.labels(b_name, str(b_res.status)).inc()
+
+
+@contextlib.contextmanager
+def backend_errors(f_req, b_name):
+    """Map client-side failures talking to backend ``b_name`` to 504/502/500.
+
+    Yields the start time for observe_backend_response. Shared by every call to
+    a backend (request() and the conversion poll), so the status a client sees,
+    the log line and the error metrics cannot drift apart between them. The
+    block covers reading the response body too: a backend dying mid-body is a
+    502, not an unhandled 500.
+    """
+    app = f_req.app
+    b_start = time.monotonic()
+    try:
+        yield b_start
     except aiohttp.ServerTimeoutError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
