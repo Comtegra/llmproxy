@@ -80,6 +80,7 @@ print(result.answers[0].probability)
 ```
 
 Requests use `model`, a text-string `input`, and an ordered `questions` array.
+Question names are optional strings; unnamed answers have `name: null`.
 Answers are returned directly in `answers`, in request order. `predicate`
 returns the probability of true; `choice` preserves string/boolean values;
 `score` returns the expected zero-based level index, which may be fractional.
@@ -88,7 +89,9 @@ The adapter does not generate conversational text or a natural-language summary.
 Message arrays, images, files, streaming, generation parameters, cache controls,
 `safety_identifier`, unknown fields and native-only question types return 400
 before inference. Each choice/score question requires 2-255 unique values/labels.
-Configured question and branch limits also apply. This is a supported subset of
+Requests accept 1-400 questions, subject to configured question and branch
+limits (defaults: 16 questions and 64 branches). Each supported question counts
+as one branch. This is a supported subset of
 an OpenAI beta contract, not equivalent model calibration or refusal behavior.
 
 Both formats share authentication, per-user/model rate limits, timeouts,
@@ -101,8 +104,7 @@ backend answers fail with 502 before billing.
 The model catalog lists the native endpoint and, for supported adapters,
 `/v1/decisions`. `decision_capabilities.question_types` describes native types;
 `openai_question_types`, `openai_input` and `openai_streaming` describe the
-OpenAI frontend. See [the Decisions guide](docs/openai_decisions.md) for curl
-examples and supported limits.
+OpenAI frontend.
 
 A request naming a model on an endpoint of another type is rejected with 404
 and `code: model_not_supported` before inference, rate limiting and billing.
