@@ -158,8 +158,11 @@ is a `400`.
   (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.
 * **Upgrading:** the backend must support background conversions
   (file-processor with `background` and delivery claims). Deploy it before
-  the proxy; with an older backend synchronous requests keep working and
-  `background=true` is a `502`.
+  the proxy. With an older file-processor synchronous requests keep working
+  and `background=true` is a `502` at submission: it either converts
+  synchronously (the work is not billed) or, with
+  `MARKER_DATALAB_COMPAT_SYNC=False`, queues the job under a content-hash id
+  the proxy refuses.
 
 ## Monitoring (Prometheus metrics)
 

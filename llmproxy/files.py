@@ -255,13 +255,18 @@ def _accepted(f_req, user, b_name, b_cfg, data):
     b_request_id = data.get("request_id")
     if not isinstance(b_request_id, str) \
             or not conversion_id.REQUEST_ID_RE.fullmatch(b_request_id):
-        # A backend that ignores background=true converts synchronously and
-        # answers without a request id: it predates background conversions.
+        # A file-processor that predates background conversions either
+        # ignores background=true and converts synchronously (no request id)
+        # or, with MARKER_DATALAB_COMPAT_SYNC=False, queues the job under its
+        # 16-hex content hash, for which it reports no delivery claims.
         app.logger.error(
             "File-convert backend %s returned no usable request_id for a "
-            "background conversion (backend does not support background=true; "
-            "update the file-processor): request_id=%s",
-            b_name, f_req["request_id"])
+            "background conversion (got %s; the backend does not support "
+            "background conversions, update the file-processor): "
+            "request_id=%s", b_name,
+            "a 16-hex content hash" if isinstance(b_request_id, str)
+                and len(b_request_id) == 16 else "none or malformed",
+            f_req["request_id"])
         raise aiohttp.web.HTTPBadGateway(
             text="File conversion backend does not support background "
                 "conversion")

@@ -104,6 +104,10 @@ class TestConversionId(unittest.TestCase):
             "fc_%s.%s" % (b64(b'["mymarker","%2e%2e"]'), tag),
             "fc_%s.%s" % (b64(b'["mymarker",""]'), tag),
             "fc_%s.%s" % (b64(b'["mymarker","%s"]' % (b"a" * 129)), tag),
+            # Only the backend's 32-hex job ids; not a 16-hex content hash.
+            "fc_%s.%s" % (b64(b'["mymarker","0123456789abcdef"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","%s"]' % RID.upper().encode()),
+                tag),
             # Wrong tag length.
             "fc_%s.%s" % (b64(b'["mymarker","%s"]' % RID.encode()),
                 b64(b"x" * 15)),
@@ -118,7 +122,8 @@ class TestConversionId(unittest.TestCase):
                 self.assertIsNone(conversion_id.parse(job_id))
 
     def test_make_refuses_unsafe_request_id(self):
-        for rid in ("", "a/b", "../x", "a" * 129, "a b", "ą"):
+        for rid in ("", "a/b", "../x", "a" * 129, "a b", "ą",
+                "0123456789abcdef", RID.upper(), RID + "0", RID[:-1]):
             with self.subTest(rid=rid), self.assertRaises(ValueError):
                 conversion_id.make(TOKEN, "myuser", "mymarker", rid)
 
@@ -380,6 +385,19 @@ class TestBackgroundConversion(LLMProxyAppTestCase):
         # synchronously: there is no request id to hand out.
         status, _, _ = await self.submit(_no_request_id="1")
         self.assertEqual(status, 502)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_old_backend_content_hash_request_id_is_502(self):
+        # An older file-processor with MARKER_DATALAB_COMPAT_SYNC=False queues
+        # the job under its 16-hex content hash and never reports a claim:
+        # refused at submission, not after a 202 on every poll.
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            status, headers, _ = await self.submit(
+                _request_id_raw='"0123456789abcdef"')
+        self.assertEqual(status, 502)
+        self.assertNotIn("Location", headers)
+        self.assertIn("16-hex content hash", logs.output[0])
+        self.assertIn("update the file-processor", logs.output[0])
         self.assertListEqual(await self.get_events(), [])
 
     async def test_backend_without_claim_never_delivers(self):

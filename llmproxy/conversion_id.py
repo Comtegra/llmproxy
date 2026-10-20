@@ -26,14 +26,16 @@ import re
 
 PREFIX = "fc_"
 
-# Generous for a backend alias plus a 128-character request id, and small
-# enough that a client cannot make the proxy decode arbitrary amounts of data.
+# Generous for a backend alias plus a request id, and small enough that a
+# client cannot make the proxy decode arbitrary amounts of data.
 MAX_LENGTH = 512
 
-# Charset the backend's request id must stick to: it becomes a URL path
-# segment on the poll, so nothing that could escape the segment ("/", "..",
-# "%", "?") may get through.
-REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# The backend's request id for a background job: 32 random hex digits. It
+# becomes a URL path segment on the poll, so nothing that could escape the
+# segment ("/", "..", "%", "?") may get through; and an older file-processor
+# answers with a 16-hex content hash instead, which is not a per-job id it can
+# claim deliveries for.
+REQUEST_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 _KEY_CONTEXT = b"llmproxy/files-convert/job-id/v1"
 _TAG_SIZE = 16
@@ -77,7 +79,7 @@ def make(token, owner, backend, request_id):
     ``owner`` is the submitting API key's id; ``token`` the backend's token.
     """
     if not REQUEST_ID_RE.fullmatch(request_id):
-        raise ValueError("request_id has characters outside [A-Za-z0-9_-]")
+        raise ValueError("request_id is not 32 hex digits")
     payload = json.dumps([backend, request_id],
         separators=(",", ":")).encode()
     return "%s%s.%s" % (PREFIX, _b64encode(payload),
