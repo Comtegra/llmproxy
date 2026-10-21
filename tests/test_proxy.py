@@ -703,17 +703,21 @@ class TestModelRouting(LLMProxyAppTestCase):
 
         self.assertListEqual(await self.get_events(), [])
 
-    async def test_missing_model_is_404_json(self):
+    async def test_missing_model_is_400_json(self):
+        # As in the OpenAI API: a request without a model is malformed, not a
+        # request for a model named None.
         req = self.client.request("POST", "/v1/chat/completions",
             headers=self.AUTH,
             json={"messages": [{"role": "user", "content": "hi"}]})
         async with req as res:
-            self.assertEqual(res.status, 404)
+            self.assertEqual(res.status, 400)
             data = await res.json()
 
-        self.assertEqual(data["error"]["code"], "model_not_found")
+        self.assertEqual(data["error"]["type"], "invalid_request_error")
+        self.assertEqual(data["error"]["param"], "model")
         self.assertEqual(data["error"]["message"],
-            "The model None does not exist.")
+            "Missing required parameter: 'model'.")
+        self.assertListEqual(await self.get_events(), [])
 
     async def test_rejected_model_does_not_consume_rate_limit(self):
         # The type check runs before ratelimit.slot, so a rejected request
@@ -806,12 +810,11 @@ class TestMalformedBody(LLMProxyAppTestCase):
                         "multipart/form-data; boundary=xyz")
                     await self._assert_400(req, path, param="model")
 
-    async def test_null_model_is_still_404(self):
-        # null is "no model": model_not_found, like a missing key.
+    async def test_null_model_is_400_like_a_missing_one(self):
         async with self._raw("/v1/chat/completions", b'{"model": null}') as res:
-            self.assertEqual(res.status, 404)
+            self.assertEqual(res.status, 400)
             data = await res.json()
-        self.assertEqual(data["error"]["code"], "model_not_found")
+        self.assertEqual(data["error"]["param"], "model")
 
     async def test_undecodable_json_body_is_400(self):
         # Only JSONDecodeError used to be caught; everything else was a 500.

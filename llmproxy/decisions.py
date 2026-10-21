@@ -32,7 +32,8 @@ async def decide(request):
 
     async with proxy.request(request, user=user, backend_type="decision",
             path=decision_adapters.backend_path, backend_body_transform=transform) as (response, alias, backend):
-        return await respond(request, user, response, alias, backend, prepared)
+        return await respond(request, user, response, alias, backend, prepared,
+            backend_error=native_backend_error)
 
 
 def prepare(body, backend):
@@ -50,7 +51,9 @@ async def respond(request, user, response, alias, backend, prepared, *, render=N
                 request_id=request["request_id"], max_bytes=limit, log_body=False)
         except aiohttp.web.HTTPException as exc:
             if backend_error:
-                raise backend_error(request, exc) from exc
+                mapped = backend_error(request, exc)
+                if mapped is not exc:
+                    raise mapped from exc
             raise
         if response.content_type != "application/json":
             raise ValueError("invalid_response")
@@ -70,7 +73,7 @@ async def respond(request, user, response, alias, backend, prepared, *, render=N
         raise _bad_gateway(request) from exc
     try:
         frontend = (render(request, alias, result) if render else
-            aiohttp.web.Response(body=raw, content_type="application/json"))
+            native_response(raw, data, alias))
     except (ValueError, TypeError, OverflowError, RecursionError) as exc:
         raise _bad_gateway(request) from exc
     await billing.record(request, user, {
@@ -90,6 +93,44 @@ async def respond(request, user, response, alias, backend, prepared, *, render=N
         request["request_id"], alias, prepared.question_count, prepared.branches,
         usage.input_tokens, usage.output_tokens)
     return frontend
+
+
+def native_response(raw, data, alias):
+    """The backend's native answer, naming the model by the client's alias.
+
+    The proxy sends the backend its own model id (e.g. a GGUF repository),
+    and the backend echoes it. Clients asked for the alias and match on it,
+    as on /v1/decisions; the id behind the alias may change. Only "model"
+    is replaced: values, key order and non-ASCII text stay as the backend
+    sent them. A wire format without "model" (another adapter's) keeps its
+    exact bytes.
+    """
+    if not isinstance(data, dict) or "model" not in data:
+        return aiohttp.web.Response(body=raw, content_type="application/json")
+    return aiohttp.web.Response(content_type="application/json",
+        text=json.dumps(data | {"model": alias}, ensure_ascii=False,
+            separators=(",", ":")))
+
+
+# Backend statuses that describe the client's request. The proxy checks only
+# the structure of a native request and leaves its semantics to the backend,
+# so the backend's own message is what tells the client what to fix.
+_NATIVE_CLIENT_STATUSES = frozenset((400, 413, 422, 429))
+
+
+def native_backend_error(request, exc):
+    """Keep a client error in the native format; normalize everything else.
+
+    Authentication already succeeded at the proxy, so a backend 401/403 is a
+    misconfigured backend credential and 404/405 a wrong backend path, not
+    the client's fault: they become the same 502 as on /v1/decisions, without
+    the upstream body.
+    """
+    if exc.status in _NATIVE_CLIENT_STATUSES:
+        return exc
+    error = backend_error(request, exc)
+    error.set_status(502)
+    return error
 
 
 def backend_error(request, exc):

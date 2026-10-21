@@ -125,15 +125,18 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     f_body = await _read_body(f_req)
 
     b_name = f_body.get("model")
+    # A missing model (absent or null) is a malformed request, as in the
+    # OpenAI and Anthropic APIs: 400, not "model None does not exist".
+    if b_name is None:
+        raise errors.bad_request(f_req,
+            "Missing required parameter: 'model'.", param="model")
     # A list or object is unhashable (the lookup below would raise), and a
-    # number or bool is never a model name. A missing model (None) falls
-    # through to model_not_found.
-    if b_name is not None and not isinstance(b_name, str):
+    # number or bool is never a model name.
+    if not isinstance(b_name, str):
         raise errors.bad_request(f_req,
             "Invalid type for 'model': expected a string.", param="model")
     b_cfg = app["config"].get("backends", {}).get(b_name)
     if b_cfg is None:
-        # %r: a missing "model" reads as None, not as a model named 'None'.
         raise _model_error(f_req, "The model %r does not exist." % b_name,
             "model_not_found")
 

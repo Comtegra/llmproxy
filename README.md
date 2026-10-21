@@ -85,11 +85,18 @@ one branch. Other request parameters are rejected.
 
 Billing uses native input/output token counts. Cache and reasoning detail
 counters are zero. Invalid backend responses return 502 before billing.
+
+Both endpoints answer with the model alias the client asked for, not the
+backend's model id. On `/v1/systemone` a backend 400/413/422/429 (the backend
+validates native semantics) keeps its status and body; any other backend 4xx
+(e.g. 401/403 from a wrong backend token) is the proxy's fault and becomes a
+502 without the upstream body.
 `/v1/models` exposes supported endpoints and `decision_capabilities`.
 
 A request naming a model on an endpoint of another type is rejected with 404
 and `code: model_not_supported` before inference, rate limiting and billing.
-An unknown model receives 404 and `code: model_not_found`.
+An unknown model receives 404 and `code: model_not_found`. A request without
+`model` (absent or null) is malformed: 400 with `param: model`.
 
 **Upgrading:** the proxy refuses to start while any backend lacks a valid
 `type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which
