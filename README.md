@@ -38,22 +38,58 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `embedding` | `/v1/embeddings` |
 | `transcription` | `/v1/audio/transcriptions` |
 | `conversion` | `/v1/files/convert` |
-| `decision` | `/v1/systemone`, `/v1/basal`, `/v1/decisions` |
+| `decision` | `/v1/systemone` (native), `/v1/decisions` (OpenAI Decisions subset) |
 
-Native Basal decisions use their own request/response schema and token usage,
-with the same client authentication and billing as the other endpoints.
-See [Basal configuration, examples and local E2E tests](docs/basal_decisions.md).
-The `decision` backend's `model` is catalog metadata; its routing alias is
-removed from the body forwarded to Basal.
-All three decision endpoints use the same handler and forward to the
-backend's `/v1/systemone` route.
+### Decision backends
 
-A request naming a model on an endpoint of another type (e.g. chat completions
-with an embedding model) is rejected with `404` and `code: model_not_supported`
-before it reaches the backend: it is not billed and does not count against
-rate limits. An unknown model gets `404` with `code: model_not_found`. On
-`/v1/messages` both use the Anthropic error shape (`not_found_error`). The type
-is exposed through `/v1/models`.
+- `/v1/systemone`: native Basal format; types `noul`, `choice`, `score`,
+  `multi`, `act`, and `tool`.
+- `/v1/decisions`: supported [OpenAI Decisions beta](https://developers.openai.com/api/docs/guides/decisions)
+  format; types `predicate`, `choice`, and `score`.
+
+Configure `type = "decision"` and `decision_adapter = "basal"` (the default).
+Both endpoints use the configured Basal backend and share authentication,
+rate limits, billing and metrics.
+
+Use a Python client exposing `client.decisions` (tested with `openai==3.26.0`):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="YOUR_PROXY_BASE_URL/v1",
+    api_key="YOUR_PROXY_API_KEY",
+)
+result = client.decisions.create(
+    model="basal-20-max",
+    input="The customer received a damaged product.",
+    questions=[{
+        "type": "predicate",
+        "name": "complaint",
+        "instructions": "Is this a complaint?",
+    }],
+)
+print(result.answers[0].probability)
+```
+
+`/v1/decisions` accepts `model`, `input` and `questions`. Input is a string or
+user messages with text content or `input_text` parts. Text parts are joined
+with newlines, messages with blank lines. Tables can be supplied as text.
+Images, audio, files, other roles and streaming are rejected with 400.
+
+Answers preserve question order: `predicate` returns a probability, `choice`
+returns one string/boolean option, and `score` returns the expected zero-based
+level index. Choice and score questions require 2-255 unique options/labels.
+Question and branch limits default to 16 and 64; each supported question uses
+one branch. Other request parameters are rejected.
+
+Billing uses native input/output token counts. Cache and reasoning detail
+counters are zero. Invalid backend responses return 502 before billing.
+`/v1/models` exposes supported endpoints and `decision_capabilities`.
+
+A request naming a model on an endpoint of another type is rejected with 404
+and `code: model_not_supported` before inference, rate limiting and billing.
+An unknown model receives 404 and `code: model_not_found`.
 
 **Upgrading:** the proxy refuses to start while any backend lacks a valid
 `type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which
