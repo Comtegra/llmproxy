@@ -43,6 +43,17 @@ http_origin = "*"
 #rpm = 60
 #concurrency = 5
 
+# Polling background file conversions (GET /v1/files/convert/{id}). Polls do
+# not count against rpm/concurrency, and for a background submission
+# (background=true) concurrency only bounds the upload: the job stays queued
+# on the backend after the 202, so only rpm bounds how many jobs a key queues.
+# Polls have a limit of their own: each API key may have at most
+# max_polls_in_flight polls in flight (more get 429), and a poll answer from
+# the backend larger than max_poll_response_bytes is a 502. Reloaded on SIGHUP.
+#[files]
+#max_polls_in_flight = 4
+#max_poll_response_bytes = 134217728  # 128 MiB (Markdown + base64 images)
+
 # EU AI Act Art. 50(2) provenance marking. Generative responses (chat,
 # completions, messages, responses) carry an "X-AI-Generated: true" header;
 # non-streaming ones additionally get a machine-readable top-level
@@ -172,6 +183,9 @@ uri = "sqlite://db.sqlite"
 # it with form field model=pdf-to-markdown. Billed as one-off
 # pdf-to-markdown/<device>/conversion (quantity = page_count from Marker).
 # Put the microservice APP_TOKEN in token= below (do not commit secrets).
+# token and device are required: the token also signs the ids of background
+# conversions (background=true), so changing it invalidates the ids still
+# open; the device names the billed product.
 #[backends.pdf-to-markdown]
 #url = "https://marker-microservice.apps.cgc-krk-01.comtegra.cloud"
 #token = "APP_TOKEN"

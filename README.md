@@ -24,8 +24,8 @@ idempotent.
 ## Configuration
 
 See [llmproxy/config.toml](llmproxy/config.toml) for an example configuration file.
-The program will update the list of configured backends, the rate limits and
-the `[provenance]` settings (see
+The program will update the list of configured backends, the rate limits
+(including the `[files]` poll limits) and the `[provenance]` settings (see
 [AI Act provenance marking](#eu-ai-act-provenance-marking-art-502)) from the
 config file on SIGHUP. SIGHUP also flushes the authentication cache (see
 [Authentication](#authentication)).
@@ -115,6 +115,107 @@ pkill -f -HUP 'python3? .*llmproxy'
 # or in Docker
 docker kill -s=SIGHUP CONTAINER
 ```
+
+## File conversion (PDF to Markdown)
+
+`POST /v1/files/convert` (multipart: `file`, `model`, optional
+`output_format`) converts a PDF with a `conversion` backend (the marker
+microservice) and bills `MODEL/DEVICE/conversion` per page. A `conversion`
+backend must have a non-empty `token` and `device`:
+
+```toml
+[backends.pdf-to-markdown]
+url = "https://marker-microservice.example.com"
+token = "APP_TOKEN"      # the microservice's APP_TOKEN
+device = "a5000"         # billed as pdf-to-markdown/a5000/conversion
+type = "conversion"
+timeout = 1800           # a synchronous conversion takes minutes
+health_path = "healthz"  # the microservice serves /healthz, not /health
+```
+
+By default the request is synchronous: the response arrives when the
+conversion is done, which can take minutes. With `background=true` the proxy
+answers as soon as the job is queued and the client polls for the result, so
+an agent does not have to hold a connection open for the whole conversion:
+
+```sh
+curl -s -i https://llm.example.com/v1/files/convert \
+  -H "Authorization: Bearer $KEY" \
+  -F model=pdf-to-markdown -F background=true -F file=@document.pdf
+# HTTP/1.1 202 Accepted
+# Location: /v1/files/convert/fc_WyJwZGYt...
+# Retry-After: 5
+# {"id": "fc_WyJwZGYt...", "object": "file.conversion",
+#  "model": "pdf-to-markdown", "status": "queued"}
+
+curl -s https://llm.example.com/v1/files/convert/fc_WyJwZGYt... \
+  -H "Authorization: Bearer $KEY"
+```
+
+```python
+import time
+import requests
+
+API = "https://llm.example.com/v1/files/convert"
+AUTH = {"Authorization": "Bearer YOUR-API-SECRET"}
+
+with open("document.pdf", "rb") as f:
+    res = requests.post(API, headers=AUTH,
+        files={"file": ("document.pdf", f, "application/pdf")},
+        data={"model": "pdf-to-markdown", "background": "true"})
+res.raise_for_status()
+job = res.json()
+
+while job["status"] in ("queued", "in_progress"):
+    time.sleep(int(res.headers.get("Retry-After", "5")))
+    res = requests.get("%s/%s" % (API, job["id"]), headers=AUTH)
+    res.raise_for_status()
+    job = res.json()
+
+if job["status"] == "completed":
+    print(job["output"])  # same fields as the synchronous response
+else:
+    print("failed:", job["error"]["message"])
+```
+
+`GET /v1/files/convert/{id}` answers `200` with `status` `in_progress`
+(with `Retry-After`), `completed` (`output`, `output_format`, `page_count`,
+`images`, `provenance` when the backend sends it) or `failed` (`error`,
+not billed). `background` accepts `true`/`false` (or `1`/`0`); anything else
+is a `400`.
+
+* **Billing:** the pages are billed when a completed result is picked up for
+  the first time; later polls return the same result unbilled. Nothing is
+  billed at submission or for a failed conversion. Once the proxy holds a
+  complete, valid result it claims the delivery from the backend, which
+  grants the claim exactly once per job, so this holds across repeated or
+  concurrent polls, proxy restarts and replicas; a fetch that fails or is
+  refused does not use up the first pickup. A result the proxy cannot bill
+  (no valid `page_count`, a backend without delivery claims) is never handed
+  out: the poll is a `502`.
+* **Access:** the id is bound to the API key that submitted the conversion;
+  any other key, a modified id, or a job the backend no longer keeps (results
+  expire with the backend's retention, 7 days by default) gets `404` with
+  `code: conversion_not_found`. The proxy keeps no state: the id carries the
+  backend and its job id, signed with a key derived from the backend's
+  `token`. Changing that token invalidates the ids of open conversions.
+* **Rate limits:** polls do not count against the model's `rpm` or
+  `concurrency` limits; only the submission does. For a background
+  submission `concurrency` bounds only the upload, not the jobs waiting on
+  the backend after the `202`: the number of jobs a key can queue is bounded
+  by `rpm`. Polls have a limit of their own: each API key may
+  have at most 4 polls in flight (more get `429` with `Retry-After`), and a
+  backend answer over 128 MiB is a `502`. Both are set in `[files]`
+  (`max_polls_in_flight`, `max_poll_response_bytes`) and reloaded on SIGHUP.
+  A client that stops reading a result for `timeout_read` loses the
+  connection (the result was billed; the next poll returns it unbilled).
+* **Upgrading:** the backend must support background conversions
+  (file-processor with `background` and delivery claims). Deploy it before
+  the proxy. With an older file-processor synchronous requests keep working
+  and `background=true` is a `502` at submission: it either converts
+  synchronously (the work is not billed) or, with
+  `MARKER_DATALAB_COMPAT_SYNC=False`, queues the job under a content-hash id
+  the proxy refuses.
 
 ## Monitoring (Prometheus metrics)
 
@@ -470,7 +571,9 @@ Endpoint coverage:
   byte-for-byte.
 * `/v1/files/convert` -- header only. Converted Markdown is derived from the
   uploaded PDF; Marker's JSON body (including any provenance object) is
-  forwarded unchanged.
+  forwarded unchanged. The same holds for a completed background conversion
+  picked up through `GET /v1/files/convert/{id}` (Marker's provenance object
+  is passed through as the `provenance` field).
 * `/v1/embeddings`, `/v1/models`, error responses -- never marked: vectors,
   metadata and errors are not synthetic content.
 

@@ -1038,7 +1038,30 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
                 meta = {"type": backend_type}
                 if backend_type == "decision":
                     meta.update(url="https://example.org", model="basal", device="a5000")
+                if backend_type == "conversion":
+                    meta.update(token="APP_TOKEN", device="a5000")
                 config.validate({"backends": {"m": meta}})
+
+    def test_validate_conversion_requires_token(self):
+        # The token keys the signature of background conversion ids; an empty
+        # one would let anybody mint an id for any job.
+        for meta in ({}, {"token": ""}, {"token": "  "}, {"token": None},
+                {"token": 123}):
+            with self.subTest(meta=meta):
+                with self.assertRaisesRegex(config.ConfigError,
+                        'Backend "m" token must be a non-empty string'):
+                    config.validate({"backends": {"m":
+                        {"type": "conversion", "device": "a5000", **meta}}})
+
+    def test_validate_conversion_requires_device(self):
+        # The device names the billed product of a conversion.
+        for meta in ({}, {"device": ""}, {"device": " "}, {"device": None},
+                {"device": 5000}):
+            with self.subTest(meta=meta):
+                with self.assertRaisesRegex(config.ConfigError,
+                        'Backend "m" device must be a non-empty string'):
+                    config.validate({"backends": {"m":
+                        {"type": "conversion", "token": "t", **meta}}})
 
     def test_validate_accepts_positive_integer_max_model_len(self):
         config.validate({"backends": {"mymodel": {"type": "chat",

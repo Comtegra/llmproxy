@@ -1,0 +1,1036 @@
+"""Background file conversions: owner-bound ids, polling and billing at the
+first pickup (POST /v1/files/convert with background=true, then
+GET /v1/files/convert/{id})."""
+
+import asyncio
+import base64
+import copy
+import json
+import secrets
+import string
+import unittest
+from unittest import mock
+
+import aiohttp
+import aiohttp.test_utils
+
+from llmproxy import config, conversion_id, files, metrics
+from llmproxy.app import reload_config
+
+from .test_proxy import LLMProxyAppTestCase
+
+
+TOKEN = "mybackendtoken"
+RID = "0123456789abcdef0123456789abcdef"
+
+
+def _body(text):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+class TestConversionId(unittest.TestCase):
+    def test_round_trip(self):
+        job_id = conversion_id.make(TOKEN, "myuser", "mymarker", RID)
+        self.assertTrue(job_id.startswith("fc_"))
+        parsed = conversion_id.parse(job_id)
+        self.assertEqual((parsed.backend, parsed.request_id),
+            ("mymarker", RID))
+        self.assertTrue(conversion_id.verify(TOKEN, "myuser", parsed))
+        # URL-safe without escaping, short enough to paste around.
+        self.assertLessEqual(set(job_id),
+            set(string.ascii_letters + string.digits + "_-."))
+        self.assertLess(len(job_id), 120)
+
+    def test_bound_to_owner_and_token(self):
+        parsed = conversion_id.parse(
+            conversion_id.make(TOKEN, "myuser", "mymarker", RID))
+        for token, owner in ((TOKEN, "otheruser"), ("othertoken", "myuser"),
+                (TOKEN, "myuser "), ("", "myuser"), (None, "myuser")):
+            with self.subTest(token=token, owner=owner):
+                self.assertFalse(conversion_id.verify(token, owner, parsed))
+
+    def test_owner_compared_as_string(self):
+        # Mongo key ids are ObjectIds; the id must verify with the same value
+        # that made it, whatever its type.
+        class Oid:
+            def __str__(self):
+                return "65f0c0ffee"
+        job_id = conversion_id.make(TOKEN, Oid(), "mymarker", RID)
+        self.assertTrue(conversion_id.verify(TOKEN, "65f0c0ffee",
+            conversion_id.parse(job_id)))
+
+    def test_every_changed_character_is_rejected(self):
+        job_id = conversion_id.make(TOKEN, "myuser", "mymarker", RID)
+        alphabet = string.ascii_letters + string.digits + "_-."
+        for i, ch in enumerate(job_id):
+            replacement = alphabet[(alphabet.index(ch) + 1) % len(alphabet)]
+            forged = job_id[:i] + replacement + job_id[i + 1:]
+            with self.subTest(position=i):
+                parsed = conversion_id.parse(forged)
+                self.assertFalse(parsed is not None
+                    and conversion_id.verify(TOKEN, "myuser", parsed))
+
+    def test_truncated_and_extended_ids_rejected(self):
+        job_id = conversion_id.make(TOKEN, "myuser", "mymarker", RID)
+        for forged in [job_id[:n] for n in range(len(job_id))] \
+                + [job_id + "A", job_id + "=", job_id + ".", " " + job_id]:
+            with self.subTest(forged=forged):
+                parsed = conversion_id.parse(forged)
+                self.assertFalse(parsed is not None
+                    and conversion_id.verify(TOKEN, "myuser", parsed))
+
+    def test_malformed_ids_do_not_parse(self):
+        def b64(data):
+            return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+        tag = b64(b"x" * 16)
+        cases = [
+            "", "fc_", "fc_.", "?", "*", "..", "fc_*.*", "fc_..%2f",
+            "fc_%s" % b64(b'["mymarker","%s"]' % RID.encode()),
+            "xx_%s.%s" % (b64(b'["mymarker","%s"]' % RID.encode()), tag),
+            "fc_%s.%s" % (b64(b"not json"), tag),
+            "fc_%s.%s" % (b64(b'{"a":1}'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","%s","x"]' % RID.encode()), tag),
+            "fc_%s.%s" % (b64(b'["","%s"]' % RID.encode()), tag),
+            "fc_%s.%s" % (b64(b'[1,"%s"]' % RID.encode()), tag),
+            "fc_%s.%s" % (b64(b'["mymarker",123]'), tag),
+            # Request ids that would escape the backend URL path segment.
+            "fc_%s.%s" % (b64(b'["mymarker","../../healthz"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","a/b"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","a?b"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","%2e%2e"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker",""]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","%s"]' % (b"a" * 129)), tag),
+            # Only the backend's 32-hex job ids; not a 16-hex content hash.
+            "fc_%s.%s" % (b64(b'["mymarker","0123456789abcdef"]'), tag),
+            "fc_%s.%s" % (b64(b'["mymarker","%s"]' % RID.upper().encode()),
+                tag),
+            # Wrong tag length.
+            "fc_%s.%s" % (b64(b'["mymarker","%s"]' % RID.encode()),
+                b64(b"x" * 15)),
+            "fc_%s.%s" % (b64(b'["mymarker","%s"]' % RID.encode()),
+                b64(b"x" * 32)),
+            # Padding is never part of an id.
+            "fc_%s=.%s" % (b64(b'["mymarker","%s"]' % RID.encode()), tag),
+            "fc_" + "A" * 600 + "." + tag,
+        ]
+        for job_id in cases:
+            with self.subTest(job_id=job_id[:80]):
+                self.assertIsNone(conversion_id.parse(job_id))
+
+    def test_make_refuses_unsafe_request_id(self):
+        for rid in ("", "a/b", "../x", "a" * 129, "a b", "ą",
+                "0123456789abcdef", RID.upper(), RID + "0", RID[:-1]):
+            with self.subTest(rid=rid), self.assertRaises(ValueError):
+                conversion_id.make(TOKEN, "myuser", "mymarker", rid)
+
+    def test_overlong_id_rejected_even_if_well_formed(self):
+        # MAX_LENGTH is checked before decoding, not just implied by a
+        # decoding failure: a correctly signed but huge id is refused too.
+        job_id = conversion_id.make(TOKEN, "myuser", "m" * 400, RID)
+        self.assertGreater(len(job_id), conversion_id.MAX_LENGTH)
+        self.assertIsNone(conversion_id.parse(job_id))
+
+
+class ConversionTestCase(LLMProxyAppTestCase):
+    AUTH = {"Authorization": "Bearer mytoken"}
+
+    async def submit(self, background="true", headers=None, **fields):
+        form = aiohttp.FormData()
+        form.add_field("model", fields.pop("model", "mymarker"))
+        if background is not None:
+            form.add_field("background", background)
+        for key, value in fields.items():
+            form.add_field(key, value)
+        form.add_field("file", b"%PDF-1.4 synthetic", filename="doc.pdf",
+            content_type="application/pdf")
+        req = self.client.request("POST", "/v1/files/convert",
+            headers=headers or self.AUTH, data=form)
+        async with req as res:
+            return res.status, dict(res.headers), _body(await res.text())
+
+    async def poll(self, job_id, headers=None):
+        req = self.client.request("GET", "/v1/files/convert/%s" % job_id,
+            headers=self.AUTH if headers is None else headers)
+        async with req as res:
+            return res.status, dict(res.headers), _body(await res.text())
+
+    async def queued(self, **fields):
+        status, headers, data = await self.submit(**fields)
+        self.assertEqual(status, 202, data)
+        return data["id"]
+
+    def backend_calls(self):
+        return list(self.backend.app["paths"])
+
+
+class TestBackgroundConversion(ConversionTestCase):
+    async def test_submit_answers_202_with_id_and_bills_nothing(self):
+        status, headers, data = await self.submit(_pages="5")
+
+        self.assertEqual(status, 202)
+        self.assertEqual(set(data), {"id", "object", "model", "status"})
+        self.assertEqual(data["object"], "file.conversion")
+        self.assertEqual(data["model"], "mymarker")
+        self.assertEqual(data["status"], "queued")
+        self.assertTrue(data["id"].startswith("fc_"))
+        self.assertEqual(headers["Location"],
+            "/v1/files/convert/%s" % data["id"])
+        self.assertEqual(headers["Retry-After"], "5")
+        self.assertIn("X-Request-ID", headers)
+        self.assertNotIn("X-AI-Generated", headers)
+        # Browser clients can read where and when to poll.
+        exposed = {h.strip() for h in
+            headers["Access-Control-Expose-Headers"].split(",")}
+        self.assertLessEqual({"Location", "Retry-After"}, exposed)
+        self.assertListEqual(await self.get_events(), [])
+
+        form = self.backend.app["marker_forms"][-1]
+        self.assertEqual(form["background"], "true")
+        self.assertNotIn("model", form)
+
+    async def test_background_spellings(self):
+        for value, expected in (("true", "true"), ("TRUE", "true"),
+                ("1", "true"), ("false", "false"), ("False", "false"),
+                ("0", "false"), (None, "false")):
+            with self.subTest(value=value):
+                status, _, data = await self.submit(background=value)
+                self.assertEqual(status, 202 if expected == "true" else 200,
+                    data)
+                self.assertEqual(
+                    self.backend.app["marker_forms"][-1]["background"],
+                    expected)
+
+    async def test_invalid_background_is_400_before_backend(self):
+        for value in ("yes", "", "2", "true ", "null"):
+            with self.subTest(value=value):
+                seen = len(self.backend_calls())
+                status, _, data = await self.submit(background=value)
+                self.assertEqual(status, 400)
+                self.assertEqual(data["error"]["param"], "background")
+                self.assertEqual(data["error"]["type"],
+                    "invalid_request_error")
+                self.assertEqual(self.backend_calls()[seen:], [])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_sync_sends_background_false_and_answers_unchanged(self):
+        status, headers, data = await self.submit(background=None,
+            _pages="3")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"success": True,
+            "output": "# Converted\n\nhello", "images": {},
+            "output_format": "markdown", "page_count": 3})
+        self.assertEqual(self.backend.app["marker_forms"][-1]["background"],
+            "false")
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 3},
+        ])
+
+    async def test_poll_until_completed_then_billed_once(self):
+        job_id = await self.queued(_polls="2", _pages="7")
+
+        for _ in range(2):
+            status, headers, data = await self.poll(job_id)
+            self.assertEqual(status, 200)
+            self.assertEqual(data, {"id": job_id, "object": "file.conversion",
+                "model": "mymarker", "status": "in_progress"})
+            self.assertEqual(headers["Retry-After"], "5")
+            self.assertListEqual(await self.get_events(), [])
+
+        status, headers, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"id": job_id, "object": "file.conversion",
+            "model": "mymarker", "status": "completed", "success": True,
+            "output": "# Converted\n\nhello", "output_format": "markdown",
+            "page_count": 7, "images": {"a.png": "aGk="},
+            "provenance": {"ai_generated": True}})
+        self.assertEqual(headers["X-AI-Generated"], "true")
+        self.assertEqual(headers["X-AI-Processed"], "true")
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 7},
+        ])
+
+        # Picking the result up again returns it, unbilled.
+        for _ in range(3):
+            status, _, again = await self.poll(job_id)
+            self.assertEqual(status, 200)
+            self.assertEqual(again, data)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 7},
+        ])
+
+        # Two phases: the GETs change nothing, and every completed pickup
+        # (not the in_progress ones) then claims the delivery. Both carry the
+        # backend token.
+        self.assertEqual(len(self.backend.app["marker_polls"]), 6)
+        self.assertEqual(len(self.backend.app["marker_claims"]), 4)
+        for b_hdrs in (self.backend.app["marker_polls"]
+                + self.backend.app["marker_claims"]):
+            self.assertEqual(b_hdrs["Authorization"], "Bearer %s" % TOKEN)
+            self.assertNotIn("X-Delivery-Claim", b_hdrs)
+
+    async def test_concurrent_first_pickups_bill_once(self):
+        self.app["config"]["files"] = {"max_polls_in_flight": 12}
+        job_id = await self.queued(_pages="4")
+        before = metrics.FILE_CONVERSIONS_TOTAL.labels("mymarker")._value.get()
+
+        results = await asyncio.gather(*(self.poll(job_id)
+            for _ in range(12)))
+
+        self.assertEqual([r[0] for r in results], [200] * 12)
+        self.assertTrue(all(r[2]["status"] == "completed" for r in results))
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 4},
+        ])
+        self.assertEqual(
+            metrics.FILE_CONVERSIONS_TOTAL.labels("mymarker")._value.get(),
+            before + 4)
+
+    async def test_output_format_names_the_content_key(self):
+        # The backend stores the text under output_format unless that would
+        # shadow one of its own fields; the client always gets "output".
+        for fmt in ("html", "MarkDown", "page_count", "delivery_claimed"):
+            with self.subTest(fmt=fmt):
+                job_id = await self.queued(output_format=fmt)
+                status, _, data = await self.poll(job_id)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["output"], "# Converted\n\nhello")
+                self.assertEqual(data["output_format"], fmt)
+                self.assertNotIn("delivery_claimed", data)
+
+    async def test_failed_conversion_reported_and_not_billed(self):
+        job_id = await self.queued(_poll_fail="1")
+
+        status, headers, data = await self.poll(job_id)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"id": job_id, "object": "file.conversion",
+            "model": "mymarker", "status": "failed", "error": {
+                "message": "PDF is encrypted", "code": "conversion_failed"}})
+        self.assertNotIn("X-AI-Generated", headers)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_job_gone_from_backend_is_404(self):
+        job_id = await self.queued()
+        self.backend.app["marker_jobs"].clear()
+
+        status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"]["code"], "conversion_not_found")
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_other_api_key_gets_404_without_backend_call(self):
+        await self.insert_key("othertoken", "otheruser")
+        job_id = await self.queued()
+        seen = len(self.backend_calls())
+
+        status, _, data = await self.poll(job_id,
+            headers={"Authorization": "Bearer othertoken"})
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"]["code"], "conversion_not_found")
+        self.assertEqual(self.backend_calls()[seen:], [])
+        self.assertListEqual(await self.get_events(), [])
+
+        # The owner still gets (and pays for) the result.
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(len(await self.get_events()), 1)
+
+    async def test_forged_ids_are_404_without_backend_call(self):
+        job_id = await self.queued()
+        rid = conversion_id.parse(job_id).request_id
+        cases = [
+            job_id[:-1],
+            job_id[:-1] + ("A" if job_id[-1] != "A" else "B"),
+            job_id.replace("fc_", "fc_A", 1),
+            "fc_x.y", "%3F", "*", "fc_..",
+            # Signed with the right token, but for another key.
+            conversion_id.make(TOKEN, "otheruser", "mymarker", rid),
+            # A chat backend's token signs nothing here.
+            conversion_id.make(TOKEN, "myuser", "mymodel", rid),
+            conversion_id.make("secret-backend-token", "myuser", "nolimit",
+                rid),
+            # Unknown backend.
+            conversion_id.make(TOKEN, "myuser", "nosuchmodel", rid),
+        ]
+        seen = len(self.backend_calls())
+        for forged in cases:
+            with self.subTest(forged=forged):
+                status, _, data = await self.poll(forged)
+                self.assertEqual(status, 404)
+                self.assertEqual(data["error"]["code"],
+                    "conversion_not_found")
+        self.assertEqual(self.backend_calls()[seen:], [])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_poll_requires_auth(self):
+        job_id = await self.queued()
+        seen = len(self.backend_calls())
+
+        for headers in ({}, {"Authorization": "Bearer wrongtoken"}):
+            with self.subTest(headers=headers):
+                status, _, _ = await self.poll(job_id, headers=headers)
+                self.assertEqual(status, 401)
+        self.assertEqual(self.backend_calls()[seen:], [])
+
+    async def test_head_cannot_claim(self):
+        job_id = await self.queued()
+        seen = len(self.backend_calls())
+
+        req = self.client.request("HEAD", "/v1/files/convert/%s" % job_id,
+            headers=self.AUTH)
+        async with req as res:
+            self.assertEqual(res.status, 405)
+
+        self.assertEqual(self.backend_calls()[seen:], [])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_backend_without_background_support_is_502(self):
+        # An old file-processor ignores background=true and converts
+        # synchronously: there is no request id to hand out.
+        status, _, _ = await self.submit(_no_request_id="1")
+        self.assertEqual(status, 502)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_old_backend_content_hash_request_id_is_502(self):
+        # An older file-processor with MARKER_DATALAB_COMPAT_SYNC=False queues
+        # the job under its 16-hex content hash and never reports a claim:
+        # refused at submission, not after a 202 on every poll.
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            status, headers, _ = await self.submit(
+                _request_id_raw='"0123456789abcdef"')
+        self.assertEqual(status, 502)
+        self.assertNotIn("Location", headers)
+        self.assertIn("16-hex content hash", logs.output[0])
+        self.assertIn("update the file-processor", logs.output[0])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_missing_device_fails_before_the_claim(self):
+        # A device lost from the config (past validation, e.g. edited in
+        # place) must fail the poll before the backend spends the one-time
+        # claim; otherwise the next poll would hand the result out unbilled.
+        job_id = await self.queued(_pages="3")
+        b_cfg = self.app["config"]["backends"]["mymarker"]
+        device = b_cfg.pop("device")
+        seen = len(self.backend.app["marker_polls"])
+
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 500)
+        self.assertNotIn("hello", str(data))
+        self.assertEqual(len(self.backend.app["marker_polls"]), seen)
+        self.assertListEqual(await self.get_events(), [])
+
+        b_cfg["device"] = device
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 3},
+        ])
+
+    async def test_unparsable_backend_json_is_502(self):
+        # A body nested deeper than the parser's recursion limit, or not
+        # UTF-8, is the backend's fault: 502 on both paths, never a 500.
+        nested = b"[" * 100000 + b"]" * 100000
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.submit(background=None, _nested="1")
+        self.assertEqual(status, 502)
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.submit(_nested="1")
+        self.assertEqual(status, 502)
+
+        job_id = await self.queued()
+        for raw in (nested, b"\xff\xfe{}", b"{not json"):
+            with self.subTest(raw=raw[:10]):
+                self.backend.app["marker_control"]["poll_raw"] = raw
+                with self.assertLogs(self.app.logger, level="ERROR"):
+                    status, _, _ = await self.poll(job_id)
+                self.assertEqual(status, 502)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_backend_without_claim_never_delivers(self):
+        job_id = await self.queued(_no_claim="1")
+
+        for _ in range(2):
+            status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 502)
+            self.assertNotIn("hello", str(data))
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_bad_page_count_never_delivers(self):
+        # Refused before the claim: it is left for a pickup that works.
+        job_id = await self.queued(_omit_page_count="1")
+
+        for _ in range(2):
+            status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 502)
+            self.assertNotIn("hello", str(data))
+        self.assertListEqual(await self.get_events(), [])
+        self.assertEqual(self.backend.app["marker_claims"], [])
+
+    async def test_claim_not_confirmed_is_502_without_result(self):
+        # 409 (not completed after all), 404 (job gone, no claim endpoint),
+        # a 5xx or a garbled answer: no result without the claim.
+        job_id = await self.queued(_pages="2")
+        control = self.backend.app["marker_control"]
+        for status in (409, 404, 500, 503):
+            with self.subTest(claim_status=status):
+                control["claim_status"] = status
+                with self.assertLogs(self.app.logger, level="ERROR") as logs:
+                    code, _, data = await self.poll(job_id)
+                self.assertEqual(code, 502)
+                self.assertNotIn("hello", str(data))
+                self.assertIn("status %d" % status, logs.output[-1])
+        self.assertListEqual(await self.get_events(), [])
+
+        # None of those spent the claim: the first pickup that works bills.
+        del control["claim_status"]
+        code, _, data = await self.poll(job_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(data["status"], "completed")
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 2},
+        ])
+
+    async def test_claim_without_answer_logs_outcome_unknown(self):
+        # The claim may have been granted without the proxy hearing of it:
+        # 504, and a log line with what is needed to bill the pages by hand.
+        # The claim waits timeout_read (1 s in tests), not the backend's long
+        # timeout meant for synchronous conversions.
+        self.app["config"]["backends"]["mymarker"]["timeout"] = 30
+        job_id = await self.queued(_pages="7")
+        rid = conversion_id.parse(job_id).request_id
+        self.backend.app["marker_control"]["claim_delay"] = 1.5
+
+        with self.assertLogs(self.app.logger, level="ERROR") as logs:
+            status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 504)
+        self.assertNotIn("hello", str(data))
+        line = next(line for line in logs.output
+            if "Delivery claim outcome unknown" in line)
+        for part in (job_id, "backend_request_id=%s" % rid, "pages=7",
+                "api_key_id=myuser", "model=mymarker"):
+            self.assertIn(part, line)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_missing_text_is_refused_before_the_claim(self):
+        job_id = await self.queued(_no_text="1")
+
+        with self.assertLogs(self.app.logger, level="ERROR"):
+            status, _, _ = await self.poll(job_id)
+
+        self.assertEqual(status, 502)
+        self.assertEqual(self.backend.app["marker_claims"], [])
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_claim_only_counts_as_a_200(self):
+        # A boolean in a non-200 answer (or in an answer too large for a
+        # one-field object) is not a claim.
+        job_id = await self.queued(_pages="2")
+        control = self.backend.app["marker_control"]
+        cases = [(status, {"delivery_claimed": True})
+            for status in (201, 202, 409, 404, 500)]
+        cases.append((200, {"delivery_claimed": True, "pad": "x" * 70000}))
+        for status, body in cases:
+            with self.subTest(status=status, size=len(json.dumps(body))):
+                control["claim_status"] = status
+                control["claim_body"] = body
+                with self.assertLogs(self.app.logger, level="ERROR"):
+                    code, _, data = await self.poll(job_id)
+                self.assertEqual(code, 502)
+                self.assertNotIn("hello", str(data))
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_full_backend_ids_only_in_the_reconciliation_log(self):
+        # The backend request id fetches the result from the backend, and
+        # the conversion id carries it: routine lines (queued, delivered,
+        # refusals) log short forms, only "Delivery claim outcome unknown"
+        # logs them in full, for billing by hand.
+        control = self.backend.app["marker_control"]
+        with self.assertLogs(level="DEBUG") as logs:
+            delivered = await self.queued(_polls="1")
+            await self.poll(delivered)
+            await self.poll(delivered)
+            refused = await self.queued(_omit_page_count="1")
+            await self.poll(refused)
+            control["claim_status"] = 404
+            unconfirmed = await self.queued()
+            await self.poll(unconfirmed)
+            del control["claim_status"]
+            control["claim_delay"] = 1.5
+            unknown = await self.queued()
+            await self.poll(unknown)
+
+        app_lines = [line for line in logs.output
+            if line.startswith(("ERROR:aiohttp.web:", "WARNING:aiohttp.web:",
+                "INFO:aiohttp.web:", "DEBUG:aiohttp.web:"))]
+        self.assertTrue(any("Background conversion queued" in line
+            for line in app_lines))
+        self.assertTrue(any("Background conversion delivered" in line
+            for line in app_lines))
+        for job_id in (delivered, refused, unconfirmed, unknown):
+            rid = conversion_id.parse(job_id).request_id
+            # Short forms are there to tie the lines together.
+            self.assertTrue(any(rid[:8] in line for line in app_lines))
+            for line in app_lines:
+                if job_id == unknown \
+                        and "Delivery claim outcome unknown" in line:
+                    self.assertIn(rid, line)
+                    self.assertIn(job_id, line)
+                    continue
+                self.assertNotIn(job_id, line)
+            # The hex request id never appears in full anywhere else in the
+            # proxy's logs, its access log included (the mock backend's own
+            # access log, in this process too, is not the proxy's).
+            for line in logs.output:
+                if "Delivery claim outcome unknown" in line \
+                        or "/api/v1/marker/" in line:
+                    continue
+                self.assertNotIn(rid, line)
+
+    async def test_backend_errors_on_poll(self):
+        job_id = await self.queued()
+        control = self.backend.app["marker_control"]
+
+        control["poll_status"] = 500
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 502)
+
+        control["poll_status"] = 401
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 401)
+        self.assertEqual(data, {"error": "boom"})
+
+        del control["poll_status"]
+        control["poll_delay"] = 2  # timeout_read is 1 s in tests
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 504)
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_poll_uses_the_global_timeout(self):
+        # The backend's long timeout is for synchronous conversions; a hung
+        # poll must not hold a slot that long. Nothing is spent by it: the
+        # next pickup bills.
+        self.app["config"]["backends"]["mymarker"]["timeout"] = 30
+        job_id = await self.queued(_pages="2")
+        self.backend.app["marker_control"]["poll_delay"] = 1.5
+
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 504)
+        self.assertEqual(self.backend.app["marker_claims"], [])
+
+        del self.backend.app["marker_control"]["poll_delay"]
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 2},
+        ])
+
+    async def test_backend_unreachable_on_poll_is_502(self):
+        job_id = await self.queued()
+        await self.backend.close()
+
+        status, _, _ = await self.poll(job_id)
+
+        self.assertEqual(status, 502)
+
+    async def test_polls_do_not_use_rate_limit(self):
+        self.app["config"]["backends"]["mymarker"]["rate_limit"] = {
+            "rpm": 1, "concurrency": 1}
+        job_id = await self.queued(_polls="5")
+
+        for _ in range(6):
+            status, _, _ = await self.poll(job_id)
+            self.assertEqual(status, 200)
+
+    async def test_poll_metrics_use_route_template(self):
+        job_id = await self.queued(_polls="1")
+        counter = metrics.REQUESTS_TOTAL.labels("GET",
+            "/v1/files/convert/{id}", "200")
+        before = counter._value.get()
+
+        await self.poll(job_id)
+
+        self.assertEqual(counter._value.get(), before + 1)
+
+    async def test_token_rotation_invalidates_open_ids(self):
+        job_id = await self.queued()
+        self.app["config"]["backends"]["mymarker"]["token"] = "rotated"
+
+        status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"]["code"], "conversion_not_found")
+
+    async def test_non_bool_delivery_claimed_never_delivers(self):
+        # Only a JSON true bills; a truthy 1 or "false" string must not be
+        # read as a claim, and the result is never handed out without one.
+        for raw in ("1", "0", '"true"', '"false"', "null", "{}"):
+            with self.subTest(delivery_claimed=raw), \
+                    self.assertLogs(self.app.logger, level="ERROR"):
+                job_id = await self.queued(_claim_raw=raw)
+                for _ in range(2):
+                    status, _, data = await self.poll(job_id)
+                    self.assertEqual(status, 502)
+                    self.assertNotIn("hello", str(data))
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_invalid_page_count_never_delivers(self):
+        for raw in ("0", "-1", "true", "1.5", '"3"'):
+            with self.subTest(page_count=raw), \
+                    self.assertLogs(self.app.logger, level="ERROR"):
+                job_id = await self.queued(_pages=raw)
+                for _ in range(2):
+                    status, _, data = await self.poll(job_id)
+                    self.assertEqual(status, 502)
+                    self.assertNotIn("hello", str(data))
+        self.assertListEqual(await self.get_events(), [])
+
+    async def test_unusable_backend_request_id_is_502(self):
+        # The request id becomes a backend URL path segment on every poll.
+        for raw in ('"a/b"', '"../healthz"', '"a?b"', '""',
+                '"%s"' % ("a" * 129), '"\u0105"', "123", "null"):
+            with self.subTest(request_id=raw), \
+                    self.assertLogs(self.app.logger, level="ERROR"):
+                status, headers, data = await self.submit(_request_id_raw=raw)
+                self.assertEqual(status, 502, data)
+                self.assertNotIn("Location", headers)
+        self.assertListEqual(await self.get_events(), [])
+
+    def test_reserved_keys_match_the_file_processor(self):
+        # Pinned on purpose: the set must equal _RESERVED_KEYS in the
+        # file-processor's app/api/datalab_compat.py (provenance.FIELD is
+        # "provenance"). A change here without the same change there makes
+        # the proxy look for the text under another key than the backend
+        # stored it -- change both, then this test.
+        self.assertEqual(files._RESERVED_KEYS, frozenset({"status",
+            "success", "images", "page_count", "output_format", "error",
+            "error_code", "request_id", "delivery_claimed", "provenance"}))
+
+    async def test_reserved_output_formats_never_shadow_the_text(self):
+        # Literal copy of file-processor's _RESERVED_KEYS (datalab_compat.py),
+        # independent of both the proxy's and the mock's sets: a key missing
+        # from the proxy's list would hand out e.g. the status as the text.
+        for fmt in ("status", "STATUS", "success", "images", "page_count",
+                "output_format", "provenance", "delivery_claimed",
+                "error_code", "error", "request_id"):
+            with self.subTest(fmt=fmt):
+                job_id = await self.queued(output_format=fmt)
+                status, _, data = await self.poll(job_id)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["output"], "# Converted\n\nhello")
+                self.assertEqual(data["output_format"], fmt)
+
+    async def test_result_never_reaches_another_key_or_the_logs(self):
+        await self.insert_key("othertoken", "otheruser")
+        other = {"Authorization": "Bearer othertoken"}
+        marker = "MARKER-%s" % secrets.token_hex(8)
+
+        with self.assertLogs(level="DEBUG") as logs:
+            job_id = await self.queued(_text=marker, _polls="1")
+            own_id = (await self.submit(headers=other))[2]["id"]
+            refused_id = await self.queued(_text=marker, _no_claim="1")
+            answers = []
+            for job, hdrs in ((job_id, self.AUTH), (job_id, other),
+                    (job_id, self.AUTH), (job_id, other), (own_id, other),
+                    (refused_id, self.AUTH), (refused_id, other)):
+                answers.append((job, hdrs, await self.poll(job, headers=hdrs)))
+
+        owner_got = [a for _, h, a in answers
+            if h is self.AUTH and a[0] == 200 and a[2]["status"] == "completed"]
+        self.assertEqual([a[2]["output"] for a in owner_got], [marker])
+        for job, hdrs, (status, res_headers, data) in answers:
+            if hdrs is other:
+                self.assertNotIn(marker, json.dumps(data))
+                self.assertNotIn(marker, json.dumps(res_headers))
+                if job != own_id:
+                    self.assertEqual(status, 404)
+        for line in logs.output:
+            self.assertNotIn(marker, line)
+
+    async def test_poll_counts_backend_metrics(self):
+        job_id = await self.queued(_polls="1")
+        counter = metrics.BACKEND_REQUESTS_TOTAL.labels("mymarker", "200")
+        before = counter._value.get()
+
+        await self.poll(job_id)
+        await self.poll(job_id)
+
+        # in_progress: one GET; completed: the GET and the claim.
+        self.assertEqual(counter._value.get(), before + 3)
+
+    async def test_owner_keeps_access_after_reload_with_same_token(self):
+        job_id = await self.queued(_pages="2")
+        cfg = copy.deepcopy(self.app["config"])
+        self.app["config"]["_path"] = "unused-test-path"
+        with mock.patch("llmproxy.config.load", return_value=cfg):
+            reload_config(self.app)
+        # The reload swapped in fresh backend dicts (same token).
+        self.assertIs(self.app["config"]["backends"], cfg["backends"])
+
+        status, _, data = await self.poll(job_id)
+
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["status"], "completed")
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 2},
+        ])
+
+    async def test_polls_in_flight_limited_per_api_key(self):
+        await self.insert_key("othertoken", "otheruser")
+        other = {"Authorization": "Bearer othertoken"}
+        mine = await self.queued(_polls="10")
+        theirs = (await self.submit(headers=other, _polls="10"))[2]["id"]
+        self.backend.app["marker_control"]["poll_delay"] = 0.3
+
+        for limit in (None, 1):
+            with self.subTest(max_polls_in_flight=limit):
+                if limit is not None:
+                    self.app["config"]["files"] = {
+                        "max_polls_in_flight": limit}
+                allowed = limit or files.DEFAULT_MAX_POLLS_IN_FLIGHT
+                seen = len(self.backend.app["marker_polls"])
+
+                results = await asyncio.gather(
+                    *(self.poll(mine) for _ in range(allowed + 1)),
+                    self.poll(theirs, headers=other))
+
+                statuses = sorted(r[0] for r in results[:-1])
+                self.assertEqual(statuses, [200] * allowed + [429])
+                status, headers, data = next(r for r in results if r[0] == 429)
+                self.assertEqual(data["error"]["code"], "rate_limit_exceeded")
+                self.assertEqual(headers["Retry-After"], "5")
+                # Another key is not affected by this key's limit.
+                self.assertEqual(results[-1][0], 200)
+                self.assertEqual(results[-1][2]["status"], "in_progress")
+                # The rejected poll never reached the backend.
+                self.assertEqual(
+                    len(self.backend.app["marker_polls"]) - seen, allowed + 1)
+                # Every slot is released.
+                self.assertEqual(files._polls_in_flight, {})
+
+    async def test_poll_slot_released_on_errors(self):
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        job_id = await self.queued(_omit_page_count="1")
+        for _ in range(3):
+            status, _, _ = await self.poll(job_id)
+            self.assertEqual(status, 502)
+        self.backend.app["marker_control"]["poll_delay"] = 2
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 504)
+        self.assertEqual(files._polls_in_flight, {})
+
+    async def test_oversized_poll_answer_is_502_and_not_billed(self):
+        self.app["config"]["files"] = {"max_poll_response_bytes": 2000}
+        job_id = await self.queued(_text="x" * 3000)
+
+        for _ in range(2):
+            with self.assertLogs(self.app.logger, level="ERROR") as logs:
+                status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 502)
+            self.assertNotIn("xxxx", str(data))
+            self.assertIn("max_poll_response_bytes", logs.output[0])
+        self.assertListEqual(await self.get_events(), [])
+        # Refused before the claim, so raising the limit lets the first
+        # pickup through -- billed.
+        self.assertEqual(self.backend.app["marker_claims"], [])
+        self.app["config"]["files"] = {"max_poll_response_bytes": 10000}
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["output"], "x" * 3000)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "mymarker/none/conversion", "quantity": 1},
+        ])
+
+    async def test_client_that_does_not_read_keeps_its_slot(self):
+        # The result is written inside the poll's slot: a client that never
+        # reads it keeps holding the slot (and the result in memory), so it
+        # cannot pile up one result after another.
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        # Well past this test: a client that stops reading is cut off after
+        # timeout_read (test_reader_that_stops_is_cut_off).
+        self.app["config"]["timeout_read"] = 10
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        reader, writer = await asyncio.open_connection(self.server.host,
+            self.server.port)
+        writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\nHost: test\r\n"
+            "Authorization: Bearer mytoken\r\n\r\n" % job_id).encode())
+        await writer.drain()
+        try:
+            # Billed right before the result is written.
+            self.assertEqual(len(await self.get_events(expect=1)), 1)
+            await asyncio.sleep(0.3)
+            self.assertEqual(files._polls_in_flight, {"myuser": 1})
+            status, _, data = await self.poll(job_id)
+            self.assertEqual(status, 429, data)
+        finally:
+            writer.close()
+
+        for _ in range(500):
+            if not files._polls_in_flight:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(files._polls_in_flight, {})
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["output"]), size)
+        self.assertEqual(len(await self.get_events()), 1)
+
+    async def test_reader_that_stops_is_cut_off(self):
+        # Each piece of the result must be taken within timeout_read (1 s in
+        # tests): a client that stops reading loses the connection and frees
+        # its slot -- and the result -- instead of keeping them for good.
+        self.app["config"]["files"] = {"max_polls_in_flight": 1}
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        reader, writer = await asyncio.open_connection(self.server.host,
+            self.server.port)
+        try:
+            with self.assertLogs(self.app.logger, level="WARNING") as logs:
+                writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\n"
+                    "Host: test\r\nAuthorization: Bearer mytoken\r\n\r\n"
+                    % job_id).encode())
+                await writer.drain()
+                self.assertEqual(len(await self.get_events(expect=1)), 1)
+                self.assertEqual(files._polls_in_flight, {"myuser": 1})
+                for _ in range(400):
+                    if not files._polls_in_flight:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(files._polls_in_flight, {})
+            self.assertIn("stopped reading", "\n".join(logs.output))
+            # The connection is gone, though this client never closed it.
+            await asyncio.wait_for(reader.read(), 5)
+            self.assertTrue(reader.at_eof())
+        finally:
+            writer.close()
+
+        # Billed once already: the next pickup gets the result unbilled.
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["output"]), size)
+        self.assertEqual(len(await self.get_events()), 1)
+
+    async def test_result_response_headers(self):
+        # Written by the handler itself, the result still carries what the
+        # middlewares add to other responses.
+        self.app["config"]["http_origin"] = "https://app.example"
+        job_id = await self.queued()
+
+        status, headers, data = await self.poll(job_id)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"],
+            "application/json; charset=utf-8")
+        self.assertEqual(int(headers["Content-Length"]),
+            len(json.dumps(data).encode()))
+        self.assertIn("X-Request-ID", headers)
+        self.assertEqual(headers["Access-Control-Allow-Origin"],
+            "https://app.example")
+        self.assertIn("Retry-After", headers["Access-Control-Expose-Headers"])
+        self.assertEqual(headers["X-AI-Generated"], "true")
+
+
+    async def test_files_limits_reload_on_sighup(self):
+        job_id = await self.queued(_polls="10")
+        self.backend.app["marker_control"]["poll_delay"] = 0.3
+        self.app["config"]["_path"] = "unused-test-path"
+
+        def reload(files_cfg):
+            cfg = copy.deepcopy(self.app["config"])
+            cfg.pop("files", None)
+            if files_cfg is not None:
+                cfg["files"] = files_cfg
+            with mock.patch("llmproxy.config.load", return_value=cfg):
+                reload_config(self.app)
+
+        for files_cfg, allowed in (({"max_polls_in_flight": 1}, 1),
+                (None, files.DEFAULT_MAX_POLLS_IN_FLIGHT)):
+            with self.subTest(files=files_cfg):
+                reload(files_cfg)
+                results = await asyncio.gather(
+                    *(self.poll(job_id) for _ in range(allowed + 1)))
+                self.assertEqual(sorted(r[0] for r in results),
+                    [200] * allowed + [429])
+
+        reload({"max_poll_response_bytes": 20})  # even "processing" is more
+        del self.backend.app["marker_control"]["poll_delay"]
+        status, _, _ = await self.poll(job_id)
+        self.assertEqual(status, 502)
+
+
+class _ServerAsDeployed(aiohttp.test_utils.TestServer):
+    # aiohttp's test server cancels a handler whose client disconnects; the
+    # proxy runs with handler_cancellation=False (app.main), where the
+    # handler keeps running and sees the disconnect as an OSError instead.
+    async def _make_runner(self, **kwargs):
+        kwargs["handler_cancellation"] = False
+        return await super()._make_runner(**kwargs)
+
+
+class TestBackgroundConversionAsDeployed(ConversionTestCase):
+    """The disconnect cases under the proxy's real handler settings."""
+
+    async def get_server(self, app):
+        return _ServerAsDeployed(app, loop=self.loop)
+
+    async def test_disconnect_while_writing_the_result(self):
+        # The client goes away mid-result: no error, the slot is released and
+        # the pickup was billed once (the next poll returns it unbilled).
+        self.app["config"]["timeout_read"] = 10
+        size = 32 * 1024 ** 2
+        job_id = await self.queued(_text_size=str(size))
+
+        with self.assertNoLogs(level="ERROR"):
+            reader, writer = await asyncio.open_connection(self.server.host,
+                self.server.port)
+            writer.write(("GET /v1/files/convert/%s HTTP/1.1\r\n"
+                "Host: test\r\nAuthorization: Bearer mytoken\r\n\r\n"
+                % job_id).encode())
+            await writer.drain()
+            self.assertEqual(len(await self.get_events(expect=1)), 1)
+            await asyncio.sleep(0.2)
+            self.assertEqual(files._polls_in_flight, {"myuser": 1})
+            writer.close()
+            for _ in range(500):
+                if not files._polls_in_flight:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(files._polls_in_flight, {})
+
+        status, _, data = await self.poll(job_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(await self.get_events()), 1)
+
+
+class TestFilesConfig(unittest.TestCase):
+    def test_default_poll_response_limit(self):
+        # The default bounds the memory a key's polls may hold (a few copies
+        # of the result per slot, times max_polls_in_flight): 128 MiB, as
+        # documented in README and config.toml.
+        self.assertEqual(files.DEFAULT_MAX_POLL_RESPONSE_BYTES,
+            128 * 1024 ** 2)
+
+    def test_files_options(self):
+        config.validate({"files": {"max_polls_in_flight": 2,
+            "max_poll_response_bytes": 1024}})
+        for files_cfg in ({"max_polls_in_flight": 0},
+                {"max_polls_in_flight": -1}, {"max_polls_in_flight": True},
+                {"max_polls_in_flight": "4"},
+                {"max_poll_response_bytes": 1.5}, {"max_poll_typo": 4},
+                []):
+            with self.subTest(files=files_cfg), \
+                    self.assertRaises(config.ConfigError):
+                config.validate({"files": files_cfg})

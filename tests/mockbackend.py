@@ -1,5 +1,6 @@
 import asyncio
 import json
+import secrets
 
 import aiohttp
 import aiohttp.web_exceptions
@@ -213,6 +214,8 @@ async def marker(req):
     # Datalab Marker sync contract: multipart file in, JSON out. Failures are
     # HTTP 200 with success=false (Datalab convention); the proxy must not bill.
     post = await req.post()
+    req.app["marker_forms"].append(
+        {k: v for k, v in post.items() if isinstance(v, str)})
     # Proxy must strip `model` before forwarding -- Marker never sees it.
     if "model" in post:
         return aiohttp.web.json_response(
@@ -224,11 +227,21 @@ async def marker(req):
             {"success": False, "error": "conversion failed"},
             status=200)
 
+    if post.get("_nested"):
+        # Deeper than the JSON parser's recursion limit.
+        return aiohttp.web.Response(body=b"[" * 100000 + b"]" * 100000,
+            content_type="application/json")
+
     file_field = post.get("file")
     if file_field is None:
         return aiohttp.web.json_response(
             {"success": False, "error": "no file provided"},
             status=200)
+
+    # `_no_request_id` plays a backend that predates background conversions:
+    # it ignores background=true and converts synchronously.
+    if post.get("background") == "true" and not post.get("_no_request_id"):
+        return _marker_queue(req, post)
 
     payload = {
         "success": True,
@@ -242,6 +255,112 @@ async def marker(req):
         except (TypeError, ValueError):
             payload["page_count"] = 1
     return aiohttp.web.json_response(payload)
+
+
+# Keys the converted text is never stored under (file-processor contract).
+MARKER_RESERVED_KEYS = {"status", "success", "images", "page_count",
+    "output_format", "provenance", "delivery_claimed", "error_code", "error",
+    "request_id"}
+
+
+def _marker_queue(req, post):
+    """Datalab async contract: queue the job, answer with a request id.
+
+    Form controls: `_polls` = polls answered "processing" before the job is
+    done; `_poll_fail` = the conversion fails; `_no_claim` = a backend without
+    the claim endpoint (404); `_pages` (JSON, so 0/true/1.5/"3"
+    play a broken backend) / `_omit_page_count` as for the sync path;
+    `_claim_raw` = JSON sent as delivery_claimed instead of the one-time bool;
+    `_request_id_raw` = JSON sent as request_id (nothing is queued); `_text` =
+    the converted text, `_text_size` = that many "x" instead, `_no_text` =
+    a completed answer without the text.
+    """
+    if (raw := post.get("_request_id_raw")) is not None:
+        return aiohttp.web.json_response({"success": True,
+            "request_id": json.loads(raw)})
+    rid = secrets.token_hex(16)
+    req.app["marker_jobs"][rid] = {
+        "remaining": int(post.get("_polls", "0")),
+        "fail": bool(post.get("_poll_fail")),
+        "no_claim": bool(post.get("_no_claim")),
+        "claim_raw": post.get("_claim_raw"),
+        "pages": None if post.get("_omit_page_count")
+            else json.loads(post.get("_pages", "1")),
+        "output_format": post.get("output_format", "markdown"),
+        "text": "x" * int(post["_text_size"]) if "_text_size" in post
+            else post.get("_text", "# Converted\n\nhello"),
+        "no_text": bool(post.get("_no_text")),
+        "claimed": False,
+    }
+    return aiohttp.web.json_response({
+        "success": True,
+        "request_id": rid,
+        "request_check_url": "http://marker.invalid/api/v1/marker/%s" % rid,
+    })
+
+
+async def marker_poll(req):
+    req.app["marker_polls"].append(dict(req.headers))
+    control = req.app["marker_control"]
+    if delay := control.get("poll_delay"):
+        await asyncio.sleep(delay)
+    if (status := control.get("poll_status")) is not None:
+        return aiohttp.web.json_response({"error": "boom"}, status=status)
+    if (raw := control.get("poll_raw")) is not None:
+        return aiohttp.web.Response(body=raw, content_type="application/json")
+
+    job = req.app["marker_jobs"].get(req.match_info["request_id"])
+    if job is None:
+        return aiohttp.web.json_response({"status": "failed",
+            "success": False, "error": "Job not found",
+            "error_code": "JOB_NOT_FOUND"})
+    if job["remaining"] > 0:
+        job["remaining"] -= 1
+        return aiohttp.web.json_response(
+            {"status": "processing", "success": True})
+    if job["fail"]:
+        return aiohttp.web.json_response({"status": "failed",
+            "success": False, "error": "PDF is encrypted",
+            "error_code": "CONVERSION_FAILED"})
+
+    key = job["output_format"].lower()
+    if key in MARKER_RESERVED_KEYS:
+        key = "markdown"
+    payload = {"status": "complete", "success": True,
+        key: job["text"], "images": {"a.png": "aGk="},
+        "output_format": job["output_format"],
+        "provenance": {"ai_generated": True}}
+    if job["no_text"]:
+        del payload[key]
+    if job["pages"] is not None:
+        payload["page_count"] = job["pages"]
+    return aiohttp.web.json_response(payload,
+        headers={"X-AI-Processed": "true"})
+
+
+async def marker_claim(req):
+    """POST {job}/claim (PLAN §3): delivery_claimed=true once per completed
+    job; 409 while it is not completed; 404 for an unknown job."""
+    req.app["marker_claims"].append(dict(req.headers))
+    control = req.app["marker_control"]
+    if delay := control.get("claim_delay"):
+        await asyncio.sleep(delay)
+    if (status := control.get("claim_status")) is not None:
+        return aiohttp.web.json_response(
+            control.get("claim_body", {"error": "boom"}), status=status)
+
+    job = req.app["marker_jobs"].get(req.match_info["request_id"])
+    if job is None or job["no_claim"]:
+        return aiohttp.web.json_response({"error": "Job not found",
+            "error_code": "JOB_NOT_FOUND"}, status=404)
+    if job["remaining"] > 0 or job["fail"]:
+        return aiohttp.web.json_response({"error": "Job is not completed",
+            "status": "failed" if job["fail"] else "processing"}, status=409)
+    claimed = not job["claimed"]
+    job["claimed"] = True
+    if job["claim_raw"] is not None:
+        claimed = json.loads(job["claim_raw"])
+    return aiohttp.web.json_response({"delivery_claimed": claimed})
 
 
 @aiohttp.web.middleware
@@ -258,6 +377,11 @@ def create_app():
     app["paths"] = []
     app["decision_calls"] = []
     app["decision_control"] = {}
+    app["marker_forms"] = []
+    app["marker_jobs"] = {}
+    app["marker_polls"] = []
+    app["marker_claims"] = []
+    app["marker_control"] = {}
     app.add_routes([
         aiohttp.web.post("/v1/systemone", decision),
         aiohttp.web.get("/health", health),
@@ -271,6 +395,8 @@ def create_app():
         aiohttp.web.post("/v1/responses", responses),
         # Path-rewritten target for /v1/files/convert (not path-preserving).
         aiohttp.web.post("/api/v1/marker", marker),
+        aiohttp.web.get("/api/v1/marker/{request_id}", marker_poll),
+        aiohttp.web.post("/api/v1/marker/{request_id}/claim", marker_claim),
     ])
     return app
 
