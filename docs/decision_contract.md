@@ -47,8 +47,11 @@ adapters and use of this option with another backend type fail configuration
 validation. Engine/model names do not select wire protocols implicitly.
 
 `POST /v1/systemone` is the native entry point. It uses the selected
-adapter and preserves native response bytes. `/v1/decisions`
-is a separate OpenAI Decisions frontend; it does not accept native payloads.
+adapter and returns the native response, with only its `model` replaced by
+the client's alias (a format without `model` keeps its exact bytes). Backend
+client errors (400/413/422/429) pass through; other backend 4xx become 502.
+`/v1/decisions` is a separate OpenAI Decisions frontend; it does not accept
+native payloads.
 
 ## Adding another engine
 

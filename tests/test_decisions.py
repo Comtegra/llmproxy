@@ -173,16 +173,25 @@ class TestDecisions(LLMProxyAppTestCase):
         self.assertNotIn("token", item)
         self.assertNotIn("url", item)
 
-    async def test_explicit_basal_adapter_preserves_native_response_bytes(self):
+    async def test_native_response_names_the_alias_and_keeps_the_rest(self):
+        # The backend echoes the model id the proxy sent it (the GGUF repo);
+        # the client asked for the alias. Everything else is the backend's:
+        # values, key order, unknown fields and non-ASCII text.
         self.backend_config["decision_adapter"] = "basal"
-        raw = json.dumps({"model": "basal", "answers": {"category": {
-            "type": "choice", "choice": "yes", "probabilities": {"yes": 1}, "confidence": 1}},
+        raw = json.dumps({"model": "Remek/basal-2.0-max-GGUF", "answers": {"category": {
+            "type": "choice", "choice": "tak", "probabilities": {"tak": 0.749313235282898,
+                "nie": 1e-05}, "confidence": 0.749313235282898, "uwaga": "zażółć"}},
             "usage": {"input_tokens": 23, "output_tokens": 0},
-            "backend_metadata": {"calibration": "native"}}, indent=2).encode()
+            "backend_metadata": {"calibration": "native"}}, indent=2, ensure_ascii=False).encode()
         self.control["raw"] = raw
         response = await self.post(path="/v1/systemone")
         self.assertEqual(response.status, 200)
-        self.assertEqual(await response.read(), raw)
+        text = await response.text()
+        self.assertEqual(json.loads(text), json.loads(raw) | {"model": "basal-20-max"})
+        self.assertEqual(list(json.loads(text)), ["model", "answers", "usage", "backend_metadata"])
+        self.assertIn('"confidence":0.749313235282898', text)
+        self.assertIn("zażółć", text)
+        self.assertNotIn("Remek", text)
         self.assertEqual([event["quantity"] for event in await self.get_events()], [23, 0])
 
     async def test_other_adapter_routes_and_bills_its_normalized_usage(self):
@@ -404,9 +413,41 @@ class TestDecisions(LLMProxyAppTestCase):
             "usage": {"input_tokens": 880, "output_tokens": 0, "branches": 7,
                 "longest_prompt_tokens": 115, "latency_ms": 12.3}}
         self.control["response"] = data
-        self.assertEqual(await (await self.post(body)).json(), data)
+        self.assertEqual(await (await self.post(body)).json(), data | {"model": "basal-20-max"})
         self.assertEqual(self.calls[0][0], {k: v for k, v in body.items() if k != "model"})
         self.assertEqual(len(await self.get_events()), 2)
+
+    async def test_missing_model_is_400_on_both_frontends(self):
+        openai_body = {"input": "Synthetic test", "questions": [
+            {"type": "predicate", "instructions": "Is this a test?"}]}
+        for path, body in (("/v1/systemone", {k: v for k, v in payload().items() if k != "model"}),
+                ("/v1/decisions", openai_body), ("/v1/decisions", openai_body | {"model": None})):
+            with self.subTest(path=path, body=body):
+                res = await self.post(body, path)
+                self.assertEqual(res.status, 400)
+                self.assertEqual((await res.json())["error"]["param"], "model")
+        self.assertEqual(self.calls, [])
+
+    async def test_native_backend_errors(self):
+        # A client error keeps the backend's status and message (only the
+        # backend validates native semantics). Anything else is the proxy's
+        # problem: the client's key was accepted, so a backend 401/403 must
+        # not read as "your key is wrong", and no upstream body comes back.
+        for status in (400, 413, 422, 429):
+            with self.subTest(status=status):
+                self.control.update(status=status, raw=b'{"error":"state is required"}')
+                res = await self.post()
+                self.assertEqual(res.status, status)
+                self.assertEqual(await res.json(), {"error": "state is required"})
+        for status in (401, 403, 404, 405, 409):
+            with self.subTest(status=status):
+                self.control.update(status=status, raw=b'{"error":"upstream secret detail"}')
+                res = await self.post()
+                self.assertEqual(res.status, 502)
+                error = (await res.json())["error"]
+                self.assertEqual(error["type"], "server_error")
+                self.assertNotIn("upstream secret detail", json.dumps(error))
+        self.assertEqual(await self.get_events(), [])
 
     async def test_error_body_is_not_logged(self):
         self.control.update(status=422, raw=b'{"error":"private synthetic text"}')

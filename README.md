@@ -75,7 +75,8 @@ print(result.answers[0].probability)
 `/v1/decisions` accepts `model`, `input` and `questions`. Input is a string or
 user messages with text content or `input_text` parts. Text parts are joined
 with newlines, messages with blank lines. Tables can be supplied as text.
-Images, audio, files, other roles and streaming are rejected with 400.
+Images, audio, files, other roles, streaming and empty input are rejected
+with 400. A state over the model's context gets 422 `context_length_exceeded`.
 
 Answers preserve question order: `predicate` returns a probability, `choice`
 returns one string/boolean option, and `score` returns the expected zero-based
@@ -85,11 +86,18 @@ one branch. Other request parameters are rejected.
 
 Billing uses native input/output token counts. Cache and reasoning detail
 counters are zero. Invalid backend responses return 502 before billing.
+
+Both endpoints answer with the model alias the client asked for, not the
+backend's model id. On `/v1/systemone` a backend 400/413/422/429 (the backend
+validates native semantics) keeps its status and body; any other backend 4xx
+(e.g. 401/403 from a wrong backend token) is the proxy's fault and becomes a
+502 without the upstream body.
 `/v1/models` exposes supported endpoints and `decision_capabilities`.
 
 A request naming a model on an endpoint of another type is rejected with 404
 and `code: model_not_supported` before inference, rate limiting and billing.
-An unknown model receives 404 and `code: model_not_found`.
+An unknown model receives 404 and `code: model_not_found`. A request without
+`model` (absent or null) is malformed: 400 with `param: model`.
 
 **Upgrading:** the proxy refuses to start while any backend lacks a valid
 `type` (a SIGHUP reload keeps the previous backends; `llmproxyctl`, which

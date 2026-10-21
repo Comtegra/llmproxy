@@ -34,10 +34,18 @@ def _text(request, value, param):
     return value
 
 
+def _non_empty(request, text):
+    # Whitespace is no evidence: the backend would still be called, and
+    # billed, for a probability about nothing.
+    if not text.strip():
+        raise errors.bad_request(request, "input must contain text.", "input")
+    return text
+
+
 def input_text(request, value):
     """Join shared user evidence; do not invent role or multimodal semantics."""
     if isinstance(value, str):
-        return value
+        return _non_empty(request, value)
     if not isinstance(value, list) or not value:
         raise errors.bad_request(request, "input must be text or a non-empty array of user messages.", "input")
     messages = []
@@ -62,7 +70,7 @@ def input_text(request, value):
                     "This frontend accepts text only; images, audio and files are not supported.", part_param)
             parts.append(_text(request, part.get("text"), part_param + ".text"))
         messages.append("\n".join(parts))
-    return "\n\n".join(messages)
+    return _non_empty(request, "\n\n".join(messages))
 
 
 @dataclass(frozen=True)
