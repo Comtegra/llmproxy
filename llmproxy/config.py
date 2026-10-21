@@ -4,6 +4,8 @@ import os
 import sys
 import tomllib
 
+from . import decision_adapters
+
 
 class ConfigError(Exception):
     pass
@@ -87,6 +89,10 @@ def validate(cfg):
                 (name, ", ".join(BACKEND_TYPES)))
 
         if meta["type"] == "decision":
+            try:
+                decision_adapters.get_adapter(meta)
+            except ValueError as exc:
+                raise ConfigError('Backend "%s" unsupported decision_adapter' % name) from exc
             for key in ("url", "model", "device"):
                 if type(meta.get(key)) is not str or not meta[key].strip():
                     raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
@@ -95,6 +101,8 @@ def validate(cfg):
             if "timeout" in meta and (type(meta["timeout"]) not in (int, float)
                     or not math.isfinite(meta["timeout"]) or meta["timeout"] <= 0):
                 raise ConfigError('Backend "%s" timeout must be finite and positive' % name)
+        elif "decision_adapter" in meta:
+            raise ConfigError('Backend "%s" decision_adapter requires type decision' % name)
         if meta["type"] == "conversion":
             # Besides authenticating the proxy to the backend, the token keys
             # the signature of background conversion ids (conversion_id.py):

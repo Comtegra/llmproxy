@@ -8,6 +8,8 @@ Choosing the flavour here keeps that path check in one place.
 
 import json
 
+import aiohttp.web
+
 
 def json_error(f_req, exc_class, message, *, openai_type, anthropic_type,
         code=None, param=None, headers=None):
@@ -25,3 +27,10 @@ def json_error(f_req, exc_class, message, *, openai_type, anthropic_type,
 
     return exc_class(text=json.dumps(body), content_type="application/json",
         headers=headers)
+
+
+def bad_request(f_req, message, param=None):
+    """Build a 400 validation error in the client's API format."""
+    return json_error(f_req, aiohttp.web.HTTPBadRequest, message,
+        openai_type="invalid_request_error",
+        anthropic_type="invalid_request_error", param=param)

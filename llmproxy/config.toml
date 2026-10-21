@@ -196,10 +196,12 @@ uri = "sqlite://db.sqlite"
 
 # Add more backends here
 
-# Native Basal decisions (not Chat Completions). URL must not include /v1.
+# Basal backend: native /v1/systemone; OpenAI /v1/decisions.
+# URL must not include /v1.
 # Limits below are proxy policy, per request / per user+model, not GPU limits.
-#[backends."basal-2.0-max"]
+#[backends.basal-20-max]
 #type = "decision"
+#decision_adapter = "basal"  # wire protocol; default for existing decision configs
 #url = "https://basal-20-max-q8.llm.cgc-krk-01.comtegra.cloud"
 #model = "Remek/basal-2.0-max-GGUF"
 #device = "a5000"
@@ -208,10 +210,10 @@ uri = "sqlite://db.sqlite"
 #verify_ssl = true
 #timeout = 300
 #health_path = "health"
-#[backends."basal-2.0-max".rate_limit]
-#rpm = 30
-#concurrency = 1  # per user+model in this process, not deployment-wide
-#[backends."basal-2.0-max".decision_limits]
+#[backends.basal-20-max.rate_limit]
+#rpm = 120
+#concurrency = 4  # per user+model in this process, not deployment-wide
+#[backends.basal-20-max.decision_limits]
 #max_questions = 16
 #max_branches = 64
 #max_response_bytes = 4194304

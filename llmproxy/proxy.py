@@ -34,14 +34,6 @@ def _model_error(f_req, message, code):
         code=code, param="model")
 
 
-def _bad_request(f_req, message, param=None):
-    # 400 for a body the proxy cannot parse or route on. Without these checks
-    # the handler crashed and the client got a 500 (which SDKs retry).
-    return errors.json_error(f_req, aiohttp.web.HTTPBadRequest, message,
-        openai_type="invalid_request_error",
-        anthropic_type="invalid_request_error", param=param)
-
-
 # What aiohttp and the stdlib raise while reading a body the client got wrong:
 # ValueError (bad JSON, text not valid in its charset, an int over Python's
 # digit limit, a bad multipart boundary or base64), LookupError (unknown
@@ -88,7 +80,7 @@ async def _read_body(f_req):
         if not _is_malformed_body(e):
             raise
         # Truncated: aiohttp's message can quote a whole line of the body.
-        if f_req.path in ("/v1/systemone", "/v1/basal", "/v1/decisions"):
+        if f_req.path in ("/v1/systemone", "/v1/decisions", "/v1/chat/completions"):
             f_req.app.logger.info(
                 "Malformed decision request: request_id=%s error_type=%s at %s",
                 f_req["request_id"], type(e).__name__, _raised_at(e))
@@ -103,10 +95,10 @@ async def _read_body(f_req):
         else:
             # The rest is Python's wording (codecs, digit limits, recursion).
             message = "Could not decode the request body."
-        raise _bad_request(f_req, message)
+        raise errors.bad_request(f_req, message)
 
     if not multipart and not isinstance(body, dict):
-        raise _bad_request(f_req, "The request body must be a JSON object.")
+        raise errors.bad_request(f_req, "The request body must be a JSON object.")
     return body
 
 
@@ -117,13 +109,14 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
         backend_type, backend_body_transform=None):
     """Forward a client request to the backend selected by ``model``.
 
-    ``backend_type`` is the backend type (config.BACKEND_TYPES) the calling
+    ``backend_type`` is the backend type (or tuple of allowed types) the calling
     endpoint serves; a model of any other type is rejected with 404 before
     rate limiting, the backend call and billing.
 
     ``path`` overrides the path appended to the backend URL. By default the
     frontend path is preserved (vLLM / whisper). File conversion rewrites to
     the marker microservice's ``/api/v1/marker`` instead.
+    A callable receives the selected backend config, for adapter-specific paths.
     """
     app = f_req.app
 
@@ -136,7 +129,7 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     # number or bool is never a model name. A missing model (None) falls
     # through to model_not_found.
     if b_name is not None and not isinstance(b_name, str):
-        raise _bad_request(f_req,
+        raise errors.bad_request(f_req,
             "Invalid type for 'model': expected a string.", param="model")
     b_cfg = app["config"].get("backends", {}).get(b_name)
     if b_cfg is None:
@@ -144,7 +137,8 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
         raise _model_error(f_req, "The model %r does not exist." % b_name,
             "model_not_found")
 
-    if b_cfg["type"] != backend_type:
+    allowed_types = (backend_type,) if isinstance(backend_type, str) else backend_type
+    if b_cfg["type"] not in allowed_types:
         raise _model_error(f_req,
             "The model %r has type %r and is not supported on %s." %
                 (b_name, b_cfg["type"], f_req.rel_url.path),
@@ -158,10 +152,12 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     # which the backend 404s -- Claude Code sends ?beta=true on every request.
     # Query params carry no semantics on these endpoints, so they are dropped.
     # ``path`` lets a handler rewrite (e.g. /v1/files/convert -> api/v1/marker).
-    b_path = path if path is not None else f_req.rel_url.path[1:]
+    b_path = path(b_cfg) if callable(path) else path
+    if b_path is None:
+        b_path = f_req.rel_url.path[1:]
     b_url = yarl.URL(b_cfg["url"]) / b_path
     b_hdrs = {}
-    if backend_type != "decision" or b_cfg.get("token"):
+    if b_cfg["type"] != "decision" or b_cfg.get("token"):
         b_hdrs["Authorization"] = "Bearer %s" % b_cfg["token"]
 
     b_body = f_body.copy()
@@ -180,7 +176,7 @@ async def request(f_req, body_transform=None, user=None, path=None, *,
     try:
         budget.prepare(f_req, b_cfg, b_body)
     except budget.BudgetError as e:
-        raise _bad_request(f_req, str(e)) from e
+        raise errors.bad_request(f_req, str(e)) from e
 
     if f_req.content_type == "application/json":
         b_body = json.dumps(b_body)

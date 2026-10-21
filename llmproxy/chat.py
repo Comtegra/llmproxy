@@ -5,7 +5,10 @@ import logging
 import aiohttp
 import aiohttp.web
 
-from . import auth, billing, budget, metrics, provenance, proxy, streaming
+from . import (
+    auth, billing, budget, decision_adapters, decision_openai, errors,
+    metrics, provenance, proxy, streaming,
+)
 
 
 class _ChatStreamUsage:
@@ -40,12 +43,21 @@ def force_include_usage(body):
 # Frontend related variables are prefixed with f_.
 # Backend related variables are prefixed with b_.
 async def chat(f_req):
+    try:
+        return await _chat(f_req)
+    except aiohttp.web.HTTPUnauthorized as exc:
+        if f_req.path != "/v1/chat/completions":
+            raise
+        raise errors.json_error(f_req, aiohttp.web.HTTPUnauthorized, "Invalid or missing API key.",
+            openai_type="authentication_error", anthropic_type="authentication_error") from exc
+
+
+async def _chat(f_req):
     app = f_req.app
 
     user = await auth.require_auth(f_req)
-
-    async with proxy.request(f_req, force_include_usage, user=user,
-            backend_type="chat") as (b_res, b_name, b_cfg):
+    async with proxy.request(f_req, user=user, backend_type="chat",
+            body_transform=force_include_usage) as (b_res, b_name, b_cfg):
         app.logger.debug("Backend request completed")
 
         await proxy.check_response(app, b_name, b_res,
@@ -106,7 +118,16 @@ def model_items(cfg):
         if "max_model_len" in meta:
             item["max_model_len"] = meta["max_model_len"]
         if meta["type"] == "decision":
-            item["endpoints"] = ["/v1/systemone", "/v1/basal", "/v1/decisions"]
+            item["endpoints"] = ["/v1/systemone"]
+            adapter = decision_adapters.get_adapter(meta)
+            item["decision_capabilities"] = {
+                "question_types": sorted(adapter.capabilities.question_types),
+            }
+            if decision_openai.supports(meta):
+                item["endpoints"].append(decision_openai.PATH)
+                item["decision_capabilities"].update(
+                    openai_question_types=list(decision_openai.QUESTION_TYPES),
+                    openai_input="text_or_user_messages", openai_streaming=False)
         item.update(budget.catalog(cfg, meta))
         items.append(item)
     return items
