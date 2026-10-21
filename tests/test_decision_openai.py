@@ -130,7 +130,9 @@ class TestOpenAIDecisions(LLMProxyAppTestCase):
         self.assertEqual(await self.get_events(), [])
 
     async def test_invalid_and_unsupported_requests_never_reach_backend(self):
-        cases = [payload() | delta for delta in ({"input": []}, {"input": None}, {"stream": False},
+        empty_message = [{"role": "user", "content": [{"type": "input_text", "text": " \n"}]}]
+        cases = [payload() | delta for delta in ({"input": []}, {"input": None}, {"input": ""},
+            {"input": " \n\t"}, {"input": empty_message}, {"stream": False},
             {"safety_identifier": "user"}, {"prompt_cache_key": "cache"}, {"questions": []}, {"questions": {}},
             {"temperature": 0})]
         for delta in ({"type": "multi"}, {"type": []}, {"instructions": None}, {"name": None},
@@ -206,6 +208,20 @@ class TestOpenAIDecisions(LLMProxyAppTestCase):
         response = await self.post()
         self.assertEqual(response.status, 504)
         self.assertEqual((await response.json())["error"]["type"], "server_error")
+        self.assertEqual(await self.get_events(), [])
+
+    async def test_basal_context_overflow_is_context_length_exceeded(self):
+        # Basal's wording, as production returned it; the limit's source
+        # ("llama-server's context per slot") differs between engines.
+        self.control.update(status=422, raw=json.dumps({"error": "question 'q0': the prompt "
+            "is 96090 tokens (state, question and options), more than the 32767 tokens of "
+            "llama-server's context per slot (32768 tokens); shorten the state, the question "
+            "or the options"}).encode())
+        response = await self.post()
+        self.assertEqual(response.status, 422)
+        error = (await response.json())["error"]
+        self.assertEqual(error["code"], "context_length_exceeded")
+        self.assertNotIn("96090", error["message"])
         self.assertEqual(await self.get_events(), [])
 
     async def test_native_routes_keep_native_format_and_chat_rejects_decision_models(self):

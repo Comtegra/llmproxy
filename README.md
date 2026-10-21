@@ -75,7 +75,8 @@ print(result.answers[0].probability)
 `/v1/decisions` accepts `model`, `input` and `questions`. Input is a string or
 user messages with text content or `input_text` parts. Text parts are joined
 with newlines, messages with blank lines. Tables can be supplied as text.
-Images, audio, files, other roles and streaming are rejected with 400.
+Images, audio, files, other roles, streaming and empty input are rejected
+with 400. A state over the model's context gets 422 `context_length_exceeded`.
 
 Answers preserve question order: `predicate` returns a probability, `choice`
 returns one string/boolean option, and `score` returns the expected zero-based

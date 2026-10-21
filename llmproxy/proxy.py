@@ -18,6 +18,10 @@ CONTEXT_LENGTH_MARKERS = (
     "max model length",
     "prompt too long",
     "input too long",
+    # Basal: "the prompt is N tokens (state, question and options), more than
+    # the M tokens of <the model's context | llama-server's context per slot
+    # | vLLM's --max-len ...>"; only this part is the same for every engine.
+    "(state, question and options), more than the",
 )
 
 
