@@ -6,6 +6,7 @@ set headers, so their key rides the handshake subprotocols
 (`Sec-WebSocket-Protocol: bearer, <key>`).
 """
 
+import asyncio
 import json
 import unittest
 from unittest import mock
@@ -17,7 +18,7 @@ import aiohttp.web
 from llmproxy import auth, config
 
 from . import mockbackend
-from .test_proxy import LLMProxyAppTestCase
+from .test_proxy import LLMProxyAppTestCase, _parse_metrics
 
 
 class _App:
@@ -190,6 +191,17 @@ class MockBackendRealtimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec["model"], "mymodel")
 
 
+class _NoCancellationTestServer(aiohttp.test_utils.TestServer):
+    """The proxy's real server runs with handler_cancellation=False (a
+    billing-critical pin in app.py), so a client disconnect never kills the
+    handler mid-drain. aiohttp's test harness forces the opposite; this
+    server restores production behavior."""
+
+    async def _make_runner(self, **kwargs):
+        kwargs["handler_cancellation"] = False
+        return aiohttp.web.AppRunner(self.app, **kwargs)
+
+
 class RealtimeTestCase(LLMProxyAppTestCase):
     """Proxy-level tests: one realtime backend pointing at the mock.
 
@@ -198,6 +210,9 @@ class RealtimeTestCase(LLMProxyAppTestCase):
     carries exactly the JSON body a failed handshake would."""
 
     AUTH = {"Authorization": "Bearer mytoken"}
+
+    async def get_server(self, app):
+        return _NoCancellationTestServer(app)
 
     async def get_application(self):
         app = await super().get_application()
@@ -293,3 +308,110 @@ class TestRealtimeHandshake(RealtimeTestCase):
             self.assertEqual(json.loads(msg.data)["type"], "session.update")
         finally:
             await ws.close()
+
+
+class TestRealtimeSession(RealtimeTestCase):
+    async def audio_seconds(self):
+        async with self.client.request("GET", "/metrics") as res:
+            parsed = _parse_metrics(await res.text())
+        for line in parsed.get("llmproxy_audio_seconds_total", []):
+            if 'model="myrealtime"' in line:
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    async def test_commit_is_answered_and_metered(self):
+        before = await self.audio_seconds()
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"],
+            "conversation.item.input_audio_transcription.completed")
+        self.assertEqual(evt["usage"]["seconds"], 3.7)
+        await ws.close()
+        self.assertAlmostEqual(await self.audio_seconds() - before, 3.7)
+
+    async def test_non_completed_frames_are_not_metered(self):
+        before = await self.audio_seconds()
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps(
+            {"type": "session.update", "session": {}}))
+        self.assertEqual(json.loads((await ws.receive()).data)["type"],
+            "session.update")
+        await ws.close()
+        self.assertAlmostEqual(await self.audio_seconds(), before)
+
+    async def test_garbage_text_frame_is_still_forwarded(self):
+        before = await self.audio_seconds()
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str("not json at all")
+        msg = await ws.receive()
+        self.assertEqual(msg.data, "not json at all")
+        await ws.close()
+        self.assertAlmostEqual(await self.audio_seconds(), before)
+
+    async def test_backend_sees_only_its_token_and_rewritten_model(self):
+        # The public alias maps to the backend's real model id; the client's
+        # key (here: riding the subprotocols) must never reach the backend.
+        self.app["config"]["backends"]["myrealtime"]["model"] = \
+            "nvidia/parakeet-tdt-0.6b-v3"
+        ws = await self.client.ws_connect("/v1/realtime",
+            protocols=("bearer", "mytoken"))
+        await ws.send_str(json.dumps(
+            {"type": "input_audio_buffer.append", "audio": "QQ=="}))
+        await ws.receive()  # the echo
+        await ws.close()
+        rec = self.backend.app["ws_records"][0]
+        self.assertEqual(rec["headers"]["Authorization"],
+            "Bearer mybackendtoken")
+        self.assertNotIn("Sec-WebSocket-Protocol", rec["headers"])
+        self.assertEqual(rec["model"], "nvidia/parakeet-tdt-0.6b-v3")
+        self.assertEqual(json.loads(rec["frames"][0])["type"],
+            "input_audio_buffer.append")
+
+    async def test_backend_auth_rejection_is_masked_as_1011(self):
+        # A backend that rejects the proxy's token is a CONFIGURATION fault:
+        # the client sees a generic 1011 and a CRITICAL names the backend,
+        # never the backend's own reason.
+        self.backend.app["ws_control"]["reject_auth"] = True
+        with mock.patch.object(self.app.logger, "critical") as critical:
+            ws = await self.client.ws_connect("/v1/realtime",
+                headers=self.AUTH)
+            self.assertEqual(json.loads((await ws.receive()).data)["type"],
+                "error")
+            msg = await ws.receive()
+            self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+            self.assertEqual(msg.data, 1011)
+            critical.assert_called_once()
+            self.assertIn("myrealtime", critical.call_args[0][0] %
+                critical.call_args[0][1:]
+                if critical.call_args[0][1:] else critical.call_args[0][0])
+
+    async def test_session_limit_is_1013_passthrough(self):
+        self.backend.app["ws_control"]["max_sessions"] = True
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1013)
+
+    async def test_backend_close_code_propagates(self):
+        self.backend.app["ws_control"]["close_code"] = 1000
+        self.backend.app["ws_control"]["echo"] = False
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps(
+            {"type": "input_audio_buffer.append", "audio": "QQ=="}))
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1000)
+
+    async def test_client_disconnect_still_meters_inflight_usage(self):
+        # The client hangs up right after committing: the completed event is
+        # in flight and the drain must still meter its seconds (billing
+        # later plugs into the same hook).
+        before = await self.audio_seconds()
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.close()
+        async def metered():
+            while await self.audio_seconds() - before < 3.7:
+                await asyncio.sleep(0.05)
+        await asyncio.wait_for(metered(), 5)

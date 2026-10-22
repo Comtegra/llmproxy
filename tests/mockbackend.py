@@ -405,7 +405,10 @@ async def ws_realtime(req):
         if msg.type != aiohttp.WSMsgType.TEXT:
             continue
         record["frames"].append(msg.data)
-        evt = json.loads(msg.data)
+        try:
+            evt = json.loads(msg.data)
+        except ValueError:
+            evt = {}  # garbage in, garbage out: the pipe stays transparent
         if evt.get("type") == "input_audio_buffer.commit":
             await ws.send_str(json.dumps({
                 "type": "conversation.item.input_audio_transcription.completed",
