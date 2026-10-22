@@ -85,28 +85,10 @@ def _cache_put(digest, row, expires_at, ttl, now):
         _cache.popitem(last=False)
 
 
-def extract_token(req):
-    """The client's API key: the Authorization header first, else the
-    subprotocol pair ("bearer", key) a browser's WebSocket handshake carries
-    (browsers cannot set headers on a WS connect)."""
+async def require_auth(req):
     scheme, _, token = req.headers.get("Authorization", "").partition(" ")
-    if scheme == "Bearer":
-        return token
-    protos = [p.strip() for p in
-        req.headers.get("Sec-WebSocket-Protocol", "").split(",")
-        if p.strip()]
-    if len(protos) == 2 and protos[0] == "bearer":
-        return protos[1]
-    return None
-
-
-async def require_token(req, token):
-    """Authenticate a token value from either source (header or subprotocol).
-
-    Same cache and error semantics as require_auth. A missing token is the
-    same 401 as an unknown one and never costs a database lookup."""
-    if not token:
-        raise aiohttp.web.HTTPUnauthorized(text="Incorrect API key")
+    if scheme != "Bearer":
+        raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
 
     digest = hashlib.sha256(token.encode()).hexdigest()
 
@@ -154,10 +136,3 @@ async def require_token(req, token):
             _cache_put(digest, dict(row), expires_at, ttl, now)
 
     return row
-
-
-async def require_auth(req):
-    scheme, _, token = req.headers.get("Authorization", "").partition(" ")
-    if scheme != "Bearer":
-        raise aiohttp.web.HTTPUnauthorized(text="Unsupported authorization scheme")
-    return await require_token(req, token)

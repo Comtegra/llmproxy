@@ -1,10 +1,4 @@
-"""Tests for the /v1/realtime WebSocket endpoint.
-
-Auth (Task 1): token extraction for WS handshakes and the require_token
-entry point, ahead of the endpoint itself. Browser WebSocket clients cannot
-set headers, so their key rides the handshake subprotocols
-(`Sec-WebSocket-Protocol: bearer, <key>`).
-"""
+"""Tests for the /v1/realtime WebSocket endpoint."""
 
 import asyncio
 import json
@@ -16,70 +10,10 @@ import aiohttp
 import aiohttp.test_utils
 import aiohttp.web
 
-from llmproxy import auth, config
+from llmproxy import config
 
 from . import mockbackend
 from .test_proxy import LLMProxyAppTestCase, _parse_metrics
-
-
-class _App:
-    logger = mock.MagicMock()
-
-    def __init__(self, config):
-        self.config = config
-
-
-class _Req(dict):
-    """Request stub carrying just what require_token touches: .app and
-    .headers, plus dict access for the per-request db slot."""
-
-    def __init__(self, headers, app=None):
-        super().__init__()
-        self.app = app or _App({"db": {"uri": "sqlite://:memory:"}})
-        self.headers = headers
-
-
-class TestExtractToken(unittest.TestCase):
-    def test_bearer_header(self):
-        req = _Req({"Authorization": "Bearer mytoken"})
-        self.assertEqual(auth.extract_token(req), "mytoken")
-
-    def test_browser_subprotocol_pair(self):
-        req = _Req({"Sec-WebSocket-Protocol": "bearer, mytoken"})
-        self.assertEqual(auth.extract_token(req), "mytoken")
-
-    def test_missing_credentials(self):
-        self.assertIsNone(auth.extract_token(_Req({})))
-
-    def test_header_wins_over_subprotocol(self):
-        req = _Req({"Authorization": "Bearer header-token",
-            "Sec-WebSocket-Protocol": "bearer, sub-token"})
-        self.assertEqual(auth.extract_token(req), "header-token")
-
-    def test_subprotocol_must_be_bearer_key(self):
-        # One subprotocol, or a pair not led by "bearer": not an auth
-        # attempt -- a key must never be extracted by accident.
-        for value in ("bearer", "mytoken, bearer", "foo, mytoken",
-                "bearer, key, extra"):
-            with self.subTest(value=value):
-                self.assertIsNone(auth.extract_token(
-                    _Req({"Sec-WebSocket-Protocol": value})))
-
-    def test_authorization_scheme_must_be_bearer(self):
-        self.assertIsNone(auth.extract_token(
-            _Req({"Authorization": "Basic mytoken"})))
-
-
-class TestRequireToken(unittest.IsolatedAsyncioTestCase):
-    async def test_missing_token_is_401_without_a_lookup(self):
-        # A handshake with no credentials anywhere must not cost a
-        # database round trip: fail before the digest is even computed.
-        req = _Req({})
-        with mock.patch("llmproxy.auth.get_db") as get_db:
-            with self.assertRaises(aiohttp.web.HTTPUnauthorized) as caught:
-                await auth.require_token(req, None)
-        get_db.assert_not_called()
-        self.assertIn("Incorrect API key", caught.exception.text)
 
 
 class TestRealtimeConfig(unittest.TestCase):
@@ -297,19 +231,6 @@ class TestRealtimeHandshake(RealtimeTestCase):
         finally:
             await ws.close()
 
-    async def test_subprotocol_auth_connects_and_echoes_bearer(self):
-        # Browser handshake: no headers, the key rides the subprotocols.
-        ws = await self.client.ws_connect("/v1/realtime",
-            protocols=("bearer", "mytoken"))
-        try:
-            self.assertEqual(ws.protocol, "bearer")
-            await ws.send_str(json.dumps(
-                {"type": "session.update", "session": {}}))
-            msg = await ws.receive()
-            self.assertEqual(json.loads(msg.data)["type"], "session.update")
-        finally:
-            await ws.close()
-
 
 class TestRealtimeSession(RealtimeTestCase):
     async def audio_seconds(self):
@@ -367,11 +288,10 @@ class TestRealtimeSession(RealtimeTestCase):
 
     async def test_backend_sees_only_its_token_and_rewritten_model(self):
         # The public alias maps to the backend's real model id; the client's
-        # key (here: riding the subprotocols) must never reach the backend.
+        # key must never reach the backend.
         self.app["config"]["backends"]["myrealtime"]["model"] = \
             "nvidia/parakeet-tdt-0.6b-v3"
-        ws = await self.client.ws_connect("/v1/realtime",
-            protocols=("bearer", "mytoken"))
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
         await ws.send_str(json.dumps(
             {"type": "input_audio_buffer.append", "audio": "QQ=="}))
         await ws.receive()  # the echo
