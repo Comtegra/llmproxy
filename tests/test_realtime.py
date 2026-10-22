@@ -432,6 +432,19 @@ class TestRealtimeSession(RealtimeTestCase):
                 await asyncio.sleep(0.05)
         await asyncio.wait_for(metered(), 5)
 
+    async def test_two_inflight_events_are_both_metered_after_disconnect(self):
+        # Every in-flight completed event must be metered, not just the
+        # first: a send to the gone client must never kill the drain pump.
+        before = await self.audio_seconds()
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.close()
+        async def metered():
+            while await self.audio_seconds() - before < 7.4:
+                await asyncio.sleep(0.05)
+        await asyncio.wait_for(metered(), 5)
+
 
 class TestRealtimeRateLimits(RealtimeTestCase):
     async def test_concurrency_bounds_parallel_sessions(self):
