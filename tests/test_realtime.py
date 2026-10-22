@@ -17,6 +17,7 @@ import aiohttp.web
 from llmproxy import auth, config
 
 from . import mockbackend
+from .test_proxy import LLMProxyAppTestCase
 
 
 class _App:
@@ -187,3 +188,108 @@ class MockBackendRealtimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec["headers"]["Authorization"],
             "Bearer mybackendtoken")
         self.assertEqual(rec["model"], "mymodel")
+
+
+class RealtimeTestCase(LLMProxyAppTestCase):
+    """Proxy-level tests: one realtime backend pointing at the mock.
+
+    Pre-upgrade failures (auth, model routing) are asserted with a plain GET:
+    those paths raise before the WebSocket is prepared, so the GET response
+    carries exactly the JSON body a failed handshake would."""
+
+    AUTH = {"Authorization": "Bearer mytoken"}
+
+    async def get_application(self):
+        app = await super().get_application()
+        app["config"]["backends"]["myrealtime"] = {
+            "url": "http://%s:%d" % (self.backend.host, self.backend.port),
+            "token": "mybackendtoken",
+            "device": "none",
+            "type": "realtime",
+        }
+        return app
+
+    async def error_body(self, **kwargs):
+        resp = await self.client.get("/v1/realtime", **kwargs)
+        return resp.status, await resp.json()
+
+
+class TestRealtimeHandshake(RealtimeTestCase):
+    async def test_no_credentials_is_401(self):
+        status, body = await self.error_body()
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"]["type"], "authentication_error")
+
+    async def test_bad_key_is_401(self):
+        status, body = await self.error_body(
+            headers={"Authorization": "Bearer nope"})
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"]["type"], "authentication_error")
+
+    async def test_bad_key_fails_the_handshake_itself(self):
+        with self.assertRaises(aiohttp.WSServerHandshakeError) as caught:
+            await self.client.ws_connect("/v1/realtime")
+        self.assertEqual(caught.exception.status, 401)
+
+    async def test_unknown_model_is_404(self):
+        status, body = await self.error_body(headers=self.AUTH,
+            params={"model": "doesnotexist"})
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "model_not_found")
+
+    async def test_model_of_another_type_is_404(self):
+        # A chat model must never reach a backend over the realtime endpoint.
+        status, body = await self.error_body(headers=self.AUTH,
+            params={"model": "mymodel"})
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "model_not_supported")
+
+    async def test_missing_model_with_two_backends_is_400(self):
+        self.app["config"]["backends"]["myrealtime2"] = {
+            "url": "http://%s:%d" % (self.backend.host, self.backend.port),
+            "token": "mybackendtoken",
+            "device": "none",
+            "type": "realtime",
+        }
+        status, body = await self.error_body(headers=self.AUTH)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["param"], "model")
+
+    async def test_no_realtime_backends_is_404(self):
+        del self.app["config"]["backends"]["myrealtime"]
+        status, body = await self.error_body(headers=self.AUTH)
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "model_not_found")
+        self.assertIn("No realtime model", body["error"]["message"])
+
+    async def test_backend_unreachable_is_gateway_error(self):
+        self.app["config"]["backends"]["myrealtime"]["url"] = \
+            "http://127.0.0.1:1"
+        with self.assertRaises(aiohttp.WSServerHandshakeError) as caught:
+            await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        # 502 = refused (Linux), 504 = the same refusal surfacing as a
+        # connect timeout (Windows): either way the session never opens.
+        self.assertIn(caught.exception.status, (502, 504))
+
+    async def test_bearer_header_auth_connects(self):
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        try:
+            await ws.send_str(json.dumps(
+                {"type": "session.update", "session": {}}))
+            msg = await ws.receive()
+            self.assertEqual(json.loads(msg.data)["type"], "session.update")
+        finally:
+            await ws.close()
+
+    async def test_subprotocol_auth_connects_and_echoes_bearer(self):
+        # Browser handshake: no headers, the key rides the subprotocols.
+        ws = await self.client.ws_connect("/v1/realtime",
+            protocols=("bearer", "mytoken"))
+        try:
+            self.assertEqual(ws.protocol, "bearer")
+            await ws.send_str(json.dumps(
+                {"type": "session.update", "session": {}}))
+            msg = await ws.receive()
+            self.assertEqual(json.loads(msg.data)["type"], "session.update")
+        finally:
+            await ws.close()
