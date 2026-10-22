@@ -40,6 +40,15 @@ PASSTHROUGH_CLOSES = frozenset({1000, 1001, SESSION_LIMIT})
 # the proxy closes its end, but a stuck backend must not pin the handler.
 DRAIN_TIMEOUT = 30
 
+# After the CLIENT disconnects, the backend's reply to its last forwarded
+# frame may still be in flight. The down pump keeps reading (and metering)
+# for this grace period before the proxy closes the backend, because
+# ClientWebSocketResponse.close() ends the concurrent reader and then
+# discards every non-close frame its ack drain reads. With the client gone
+# no new audio arrives, so after the grace the backend has nothing left to
+# send; the bound covers RTT plus the backend's final flush.
+DRAIN_GRACE = 2.0
+
 HEARTBEAT_DEFAULT = 30
 
 
@@ -211,7 +220,6 @@ async def realtime(f_req):
                 done, _ = await asyncio.wait({up, down},
                     return_when=asyncio.FIRST_COMPLETED)
 
-                b_close = None
                 if down in done:
                     b_close = ws_backend.close_code
                     code, level = _map_close_code(b_close)
@@ -228,16 +236,20 @@ async def realtime(f_req):
                             f_req["request_id"])
                     await ws_client.close(code=code)
                 else:
-                    # The client went first. Close the backend so it ends its
-                    # session, then keep draining whatever it still owes (a
-                    # completed event can be in flight).
+                    # The client went first. Let the down pump drain the
+                    # backend's in-flight reply for the grace period (it is
+                    # the only reader, so nothing is lost), THEN close the
+                    # backend so it ends its session.
+                    await asyncio.wait({down}, timeout=DRAIN_GRACE)
                     await ws_backend.close(code=ws_client.close_code or 1000)
-                    try:
-                        await asyncio.wait_for(down, DRAIN_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        down.cancel()
                 up.cancel()
-                await asyncio.gather(up, down, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(up, down, return_exceptions=True),
+                        DRAIN_TIMEOUT)
+                except asyncio.TimeoutError:
+                    down.cancel()
+                    await asyncio.gather(up, down, return_exceptions=True)
                 return ws_client
             finally:
                 await ws_backend.close()
