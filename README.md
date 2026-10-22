@@ -235,11 +235,10 @@ and completed transcript events); the proxy forwards frames verbatim in both
 directions and adds the gateway around them:
 
 * **Authentication** — the same API keys as the HTTP endpoints, via the
-  `Authorization: Bearer` header. Browser WebSocket clients cannot set
-  headers, so the key may ride the handshake subprotocols instead:
-  `Sec-WebSocket-Protocol: bearer, <key>` (the proxy echoes `bearer` in the
-  101). The client's key is never forwarded to the backend: the backend
-  sees only the configured backend `token`.
+  `Authorization: Bearer` header (the standard `require_auth` path; there is
+  no WebSocket-specific credential channel). The client's key is never
+  forwarded to the backend: the backend sees only the configured backend
+  `token`.
 * **Model routing** — `?model=` is optional (OpenAI SDKs send it anyway):
   absent means the single configured realtime backend and is a `400` with
   `param: model` when more than one is configured; an unknown model gets

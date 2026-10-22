@@ -1,12 +1,11 @@
 """Realtime transcription: a WebSocket proxy with usage metering.
 
 The client speaks the OpenAI Realtime transcription subset to
-``/v1/realtime``; the proxy authenticates the API key (Bearer header, or the
-``bearer`` subprotocol a browser handshake carries), selects the backend from
+``/v1/realtime``; the proxy authenticates the API key (the same
+``require_auth`` Bearer path as the HTTP endpoints), selects the backend from
 the optional ``?model=`` query param, opens a second WebSocket to the backend
 with the backend's own token and pumps frames both ways. The client's key
-never reaches the backend: it sees only the configured ``token`` and no
-subprotocols.
+never reaches the backend: it sees only the configured ``token``.
 
 Downstream frames are sniffed for ``conversation.item.input_audio_transcription.completed``
 events so ``usage.seconds`` lands in ``llmproxy_audio_seconds_total``.
@@ -84,13 +83,6 @@ def _select_backend(req):
                 (b_name, b_cfg["type"], req.rel_url.path),
             "model_not_supported")
     return b_name, b_cfg
-
-
-def _client_offered_bearer(req):
-    """The browser negotiated 'bearer' (its key rode the subprotocols)."""
-    protos = [p.strip() for p in
-        req.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
-    return "bearer" in protos
 
 
 async def _forward_up(ws_client, ws_backend):
@@ -174,7 +166,7 @@ async def realtime(f_req):
     app = f_req.app
 
     try:
-        user = await auth.require_token(f_req, auth.extract_token(f_req))
+        user = await auth.require_auth(f_req)
     except aiohttp.web.HTTPUnauthorized as exc:
         raise errors.json_error(f_req, aiohttp.web.HTTPUnauthorized,
             "Invalid or missing API key.",
@@ -198,9 +190,7 @@ async def realtime(f_req):
         with metrics.track_user_request(user, b_name):
             ws_backend = await _connect_backend(f_req, b_name, b_cfg)
             try:
-                ws_client = aiohttp.web.WebSocketResponse(
-                    protocols=("bearer",) if _client_offered_bearer(f_req)
-                    else None)
+                ws_client = aiohttp.web.WebSocketResponse()
                 # Transcript semantics come from the input audio (the Art.
                 # 50(2) no-substantial-alteration carve-out): header-only
                 # marking, and the 101 is the only header carrier a WS has.
