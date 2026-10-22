@@ -8,6 +8,7 @@ set headers, so their key rides the handshake subprotocols
 
 import asyncio
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -415,3 +416,47 @@ class TestRealtimeSession(RealtimeTestCase):
             while await self.audio_seconds() - before < 3.7:
                 await asyncio.sleep(0.05)
         await asyncio.wait_for(metered(), 5)
+
+
+class TestRealtimeRateLimits(RealtimeTestCase):
+    async def test_concurrency_bounds_parallel_sessions(self):
+        self.app["config"]["backends"]["myrealtime"]["rate_limit"] = \
+            {"concurrency": 1}
+        first = await self.client.ws_connect("/v1/realtime",
+            headers=self.AUTH)
+        try:
+            with self.assertRaises(aiohttp.WSServerHandshakeError) as caught:
+                await self.client.ws_connect("/v1/realtime",
+                    headers=self.AUTH)
+            self.assertEqual(caught.exception.status, 429)
+            # The rejected handshake never opened a backend session.
+            self.assertEqual(len(self.backend.app["ws_records"]), 1)
+        finally:
+            await first.close()
+        # The slot outlives the client close by the drain grace (the backend
+        # session is still alive), so poll until the handler released it.
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                second = await self.client.ws_connect("/v1/realtime",
+                    headers=self.AUTH)
+                break
+            except aiohttp.WSServerHandshakeError as exc:
+                if time.monotonic() > deadline or exc.status != 429:
+                    raise
+                await asyncio.sleep(0.25)
+        await second.close()
+
+    async def test_rpm_bounds_handshakes(self):
+        self.app["config"]["backends"]["myrealtime"]["rate_limit"] = \
+            {"rpm": 1}
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.close()
+        # The window is per (user, model): a second handshake within 60 s
+        # of the admitted one is rejected before any backend connection.
+        async with self.client.get("/v1/realtime", headers=self.AUTH) as resp:
+            self.assertEqual(resp.status, 429)
+            self.assertEqual(resp.headers["Retry-After"], "60")
+            body = await resp.json()
+            self.assertEqual(body["error"]["code"], "rate_limit_exceeded")
+        self.assertEqual(len(self.backend.app["ws_records"]), 1)
