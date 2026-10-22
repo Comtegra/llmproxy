@@ -2,36 +2,27 @@
 
 Set BUDGET_VLLM_URL, BUDGET_VLLM_TOKEN and BUDGET_VLLM_MODEL.
 Requests generate at most 256 tokens each; never modify the live backend.
-Native reasoning control is tested only on Chat Completions. vLLM 0.26.0
-does not wire thinking_token_budget into Responses/Messages sampling.
+Native reasoning control is tested only on Chat Completions. vLLM does
+not wire thinking_token_budget into Responses/Messages sampling.
 
 BUDGET_VLLM_FIXTURE selects the live backend profile (default "qwen"):
 
-* "qwen" -- the original reasoning-enabled Qwen deployment (vLLM 0.26.0,
-  A100): the historical target whose unbounded default thinking burns a
-  whole 256-token budget on the math prompt.
-* "glm53" -- the CGC GLM-5.3-NVFP4 test stack (vLLM 0.29.0, 4x B200);
-  set BUDGET_VLLM_MODEL=glm-53-nvfp4 (the served name). Its calibrated
-  empiria (production probes A-F, 2026-10-21): 17*19@256 -> stop, "323",
-  natural reasoning 23 tokens (never assert equality on non-binding
-  limits); primes@128 unbounded -> length, empty content, 128/128
-  reasoning (the incident); primes@128 + thinking_token_budget 16/64 ->
-  reasoning exactly 16/64 (binding limits) plus real content.
+* "qwen" -- the original reasoning-enabled Qwen profile: the historical
+  target whose unbounded default thinking burns a whole 256-token
+  budget on the math prompt.
+* "glm53" -- a GLM-5.3-style profile with a small reserve/effort
+  calibration for bounded live runs; set BUDGET_VLLM_MODEL=glm-53-nvfp4
+  (the served name). Adjust the fixture fields to match the target
+  backend before running live.
 
 Usage-equality on reasoning tokens is asserted ONLY when the limit binds
 (below the prompt's natural thinking); otherwise only <= / shape checks.
 
-Live iteration 2 decision: this in-process live e2e is NOT run against the
-CGC stack anymore. vLLM is internal-only there (ClusterIP Service,
-ingress=False; the auth-gated proxy is the only public surface), so
-BUDGET_VLLM_URL is unreachable from the orchestrator host; the
-deployed-proxy live-check matrices (maintained with the CGC deployment
-harness, out of tree for this change) cover the budget contract live,
-and the unit fixtures cover byte-identity. The same holds for the flash
-stack: the deployed-proxy live-check matrices cover the budget contract
-and the effort_enum dialect live there — the in-process live e2e does
-not run (vLLM is internal-only/unreachable from the QA host; byte
-identity stays with unit fixtures). The env-gating below is unchanged: with no
+Live-host note: this in-process live e2e needs direct backend
+reachability via BUDGET_VLLM_URL. Where the backend's only public
+surface is an auth-gated proxy, run the deployed-proxy live-check
+matrices against that surface instead; the unit fixtures keep covering
+byte-identity here. The env-gating below is unchanged: with no
 BUDGET_VLLM_* env the suite skips explicitly and stays part of the
 offline run.
 """
@@ -78,8 +69,8 @@ class BudgetFixture:
     reserve = None
     effort_budgets = {}
     math_prompt = PROMPT
-    primes_prompt = None   # incident-reproduction prompt (empiria anchor)
-    small_cap = None       # incident cap for the primes prompt
+    primes_prompt = None   # small-cap scenario prompt (bounded-reasoning check)
+    small_cap = None       # output cap for the primes prompt scenario
 
     def backends(self, url, token, model):
         return {self.name: {"url": url, "token": token, "model": model,
@@ -108,12 +99,12 @@ class QwenFixture(BudgetFixture):
 
 
 class GLM53Fixture(BudgetFixture):
-    """The CGC GLM-5.3 (NVFP4) test stack profile: reserve 64 and effort
-    low=64 re-create the production empiria-D parameters (primes@128 ->
-    injected thinking_token_budget 64 -> reasoning exactly 64 + content);
-    small_cap 128 re-creates the empiria-C incident. max_model_len 497728
-    is the live-verified context (524288 needs 45.23 GiB KV > 42.94 GiB
-    available on 4x B200)."""
+    """A GLM-5.3-style profile with a small reserve/effort calibration:
+    reserve 64 and effort low=64 make the injected thinking_token_budget
+    bind in the small-cap scenario (min(64, 128-64) == 64), and small_cap
+    128 is that scenario's output cap. All values are the profile's
+    calibration, not universal constants: adjust them to match the
+    target backend before running live."""
 
     name = "live-glm53"
     device = "b200"
@@ -296,7 +287,8 @@ class TestLiveBudget(aiohttp.test_utils.AioHTTPTestCase):
     @unittest.skipUnless(isinstance(FIXTURE, QwenFixture),
         "qwen fixture semantics: unbounded default thinking burns the whole "
         "default budget on the math prompt; the GLM-5.3 analog is the "
-        "glm53 incident test (its natural 17*19 thinking is 23 tokens)")
+        "glm53 incident test (its natural math thinking does not burn "
+        "the whole budget)")
     async def test_native_budget_changes_reasoning_only_failure_into_content(self):
         cfg = self.app["config"]["backends"][FIXTURE.name]
         payload = {"model": FIXTURE.name, "messages": [{"role": "user", "content": FIXTURE.math_prompt}],
@@ -327,11 +319,12 @@ class TestLiveBudget(aiohttp.test_utils.AioHTTPTestCase):
         "glm53 fixture: set BUDGET_VLLM_FIXTURE=glm53 and "
         "BUDGET_VLLM_MODEL=glm-53-nvfp4 (the vLLM served name)")
     async def test_glm53_incident_reproduction_and_native_fix(self):
-        """Empiria C -> D on the test stack: primes@128 with native
-        budgeting off burns the whole cap on reasoning (length, empty
-        content, 128/128); effort low injects thinking_token_budget 64
-        (min(64, 128-64)) and reasoning lands exactly on 64 -- a binding
-        limit below the prompt's natural thinking -- with real content."""
+        """Failure shape and native fix on the glm53 profile: primes@128
+        with native budgeting off burns the whole cap on reasoning
+        (length, empty content, cap/cap reasoning); effort low injects
+        thinking_token_budget 64 (min(64, 128-64)) and reasoning lands
+        exactly on 64 -- a binding limit below the prompt's natural
+        thinking -- with real content."""
         cfg = self.app["config"]["backends"][FIXTURE.name]
         payload = {"model": FIXTURE.name,
             "messages": [{"role": "user", "content": FIXTURE.primes_prompt}],
@@ -374,8 +367,8 @@ class TestLiveBudget(aiohttp.test_utils.AioHTTPTestCase):
     async def test_glm53_client_ttb_precedence(self):
         """An explicit client thinking_token_budget wins over the effort
         map (budget.py:127-129); 16 binds below natural primes thinking
-        (>= 128), so reasoning lands exactly on 16 (empiria B) with
-        non-empty content."""
+        (>= 128), so reasoning lands exactly on 16 with non-empty
+        content."""
         payload = {"model": FIXTURE.name,
             "messages": [{"role": "user", "content": FIXTURE.primes_prompt}],
             "max_tokens": FIXTURE.small_cap, "temperature": 0, "seed": 42,
