@@ -185,6 +185,130 @@ This bounds reasoning only when the backend actually honors its sampling
 parameter/parser boundaries; transition tokens, context exhaustion and output
 quality still matter. It does not guarantee useful final content on every task.
 
+## Reasoning effort dialects (`effort_enum`) — GLM-5.3-Flash
+
+Some backends have **no token-level thinking budget at all**. GLM-5.3-Flash's
+chat template controls reasoning only through the enum kwargs
+`reasoning_effort` (`'low'` and `'high'`; anything else — including an
+omitted value — maps to `'max'`) and `clear_thinking`, accepted via the
+top-level `reasoning_effort` field or `chat_template_kwargs.reasoning_effort`.
+Live check F01 (vLLM 0.31.0, direct probes) established the opposite for the
+top-level parameter: **a top-level `thinking_token_budget` BINDS natively on
+flash** (ttb=16 → `reasoning_tokens` exactly 16), while the
+`chat_template_kwargs.thinking_token_budget` channel does **not** bind
+(F01: control 23 / top-level 16 / kwargs 23). In dialect mode the proxy
+forwards the client's `thinking_token_budget` verbatim — so the native
+binding takes precedence (E05: reasoning exactly 16); the enum stays the
+effort-shaped control and remains an approximation.
+
+The `effort_enum` dialect keeps the entire native computation and changes
+only the final injection:
+
+```toml
+[backends.glm-53f.reasoning]
+native_budget = true          # required: the token-budget computation IS the native path
+endpoints = ["chat"]
+reserve_content_tokens = 64   # still active: the 400-edge is preserved
+effort_budgets = { low = 64, high = 1024 }   # ladder thresholds; no medium on flash
+dialect = "effort_enum"       # default "native" = today's behavior, byte-identical
+```
+
+`dialect = "effort_enum"` requires `native_budget = true` and a non-empty
+`effort_budgets` table; anything other than `native`/`effort_enum` is
+rejected. `native_budget = true` stays REQUIRED with
+`dialect = "effort_enum"`: it gates the token-budget computation
+(precedence, reserve math, the 400-edges and the metadata). Phase 2
+therefore runs BOTH live paths — the enum for effort selection, and the
+native binding for an exact client `thinking_token_budget`. The proxy
+computes the token budget **exactly as in native mode**
+(same precedence, same reserve math, same 400-edges) and then maps it onto the
+highest configured effort level whose cap fits the budget:
+
+```python
+ordered = sorted(effort_budgets.items(), key=lambda kv: kv[1])
+chosen = ordered[0][0]                       # floor = smallest configured effort
+for name, cap in ordered:
+    if cap <= budget:
+        chosen = name
+```
+
+The selected effort is injected on **both channels** —
+`reasoning_effort` top-level AND `chat_template_kwargs.reasoning_effort`
+(dict-merged with any sibling kwargs; a client that already speaks the
+dialect through `chat_template_kwargs.reasoning_effort` is honored as the
+effort input when the top-level field is absent, and a top-level field wins
+over a disagreeing kwargs value). `thinking_token_budget` is never written in
+dialect mode; a client's own field is forwarded verbatim — and, being
+top-level, it BINDS natively on flash (E05: reasoning exactly 16). The
+proxy never injects a value outside the configured effort keys
+(never `max`).
+
+**The enum is an approximation: the model may think longer or shorter than
+the level implies; there is NO exact-token guarantee for the ENUM in
+dialect mode.** A client `thinking_token_budget` still binds natively on
+flash: in dialect mode it is forwarded verbatim, and the native binding
+takes precedence over the selected effort (E05: reasoning exactly 16).
+`reserve_content_tokens` keeps exactly two hard guarantees:
+(1) an output limit at/below reserve is rejected with 400 (unchanged edge),
+and (2) the computed budget — hence the selected effort — is capped at
+`forwarded - reserve`. Degradation is intended behavior: an effort whose cap
+does not fit the affordable budget maps DOWN to the highest fitting level
+(e.g. requested `high` with only 960 affordable tokens maps to `low`), which
+protects the content budget instead of honoring an unaffordable effort.
+
+Precedence (chat only, enforce only):
+
+| Input | Effect |
+| --- | --- |
+| client `thinking_token_budget` (positive int) | selects the budget; the ladder then picks the level (client wins over any effort) |
+| `reasoning_effort` (top-level) / `chat_template_kwargs.reasoning_effort` when the top-level field is absent | `effort_budgets[effort]` (or `default_effort`) selects the budget |
+| none of the above | the budget is `forwarded - reserve` (pure reserve math) |
+| then, always | the budget is capped at `forwarded - reserve`; a limit at/below reserve is a 400 |
+
+Dialect metadata is reported on chat only, in `llmproxy.budget.reasoning`:
+
+```json
+{
+  "dialect": "effort_enum",
+  "parameter": "reasoning_effort",
+  "requested_tokens": 16,
+  "requested_effort": "low",
+  "forwarded_tokens": 16,
+  "forwarded_effort": "low",
+  "source": "client",
+  "reserve_content_tokens": 64
+}
+```
+
+`forwarded_tokens` is the computed budget that SELECTED the effort level —
+it is not a parameter forwarded to the backend. `source` keeps the native
+semantics (`client` only for an explicit client `thinking_token_budget`,
+else `proxy`). The catalog's `reasoning` block always carries a `dialect`
+key (`"native"` by default); `effort_enum` there proves the dialect source
+is live, while its absence proves the baseline (pre-dialect) source — the
+flash round-1/round-2 live checks assert exactly that.
+
+Round-2 flash empiria (recorded live-check results from the CGC
+GLM-5.3-Flash test deployment, enforce matrix) — iter-1 recorded
+numbers:
+
+| Check | Observed result |
+| --- | --- |
+| Catalog E01 (dialect "effort_enum" — round-2 source live) | PASS: mode=enforce, native_budget=true, dialect "effort_enum" |
+| E02 apply_default (8128 -> "high") / E03 clamp (32704 -> "high") | 8128 -> "high" / 32704 -> "high" (both PASS) |
+| E04 effort map (64 -> "low") / E04b degradation (960 -> "low", content) | 64 -> "low", usage reasoning 2 — inside the recorded direct-low envelope [0, F02(c)+4] ("low" is a soft guide: spread {2, 63} observed per request); 960 -> "low" with content (PASS) |
+| E05 client ttb precedence (16 forwarded verbatim -> binds natively) | requested 16, forwarded 16, source client, `reasoning_tokens` EXACTLY 16 — the native binding beats the enum |
+| E06 incident mitigation (primes@128: 64 -> "low", content) vs the O02f round-1 baseline | reasoning 63, content, natural stop vs O02f 128/empty/length (PASS) |
+| E07 reserve math (2936 -> "high") | 2936 -> "high", usage reasoning 131 (PASS) |
+| O02f-vs-E06 contrast (same request: round-1 shape -> round-2 content) | O02f 128/empty/length (incident) -> E06 63 reasoning tokens, non-empty content, stop, 69 completion tokens |
+
+The O02f-vs-E06 contrast is the dialect's reason to exist: the same
+primes@128 request that consumed its whole budget on thinking in round 1
+(observe, no control) gets a ladder-injected `low` in round 2 and is
+expected to produce content — with reasoning bounded only approximately
+( relational, against the recorded round-1 baseline — never an exact-token
+claim).
+
 ## Verification and live evidence
 
 Run the standard suite (no network credentials needed):
