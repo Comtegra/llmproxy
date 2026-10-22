@@ -42,12 +42,26 @@ def catalog(cfg, backend):
         "reasoning": {"native_budget": reasoning.get("native_budget", False),
             "endpoints": reasoning.get("endpoints", ["chat"]),
             "reserve_content_tokens": reasoning.get("reserve_content_tokens"),
-            "effort_budgets": reasoning.get("effort_budgets", {})},
+            "effort_budgets": reasoning.get("effort_budgets", {}),
+            "dialect": reasoning.get("dialect", "native")},
     }}
 
 
 def positive_int(value):
     return type(value) is int and value > 0
+
+
+def effort_for_budget(budget, effort_budgets):
+    """Dialect ladder: the highest configured effort level whose cap fits
+    the computed token budget (smaller budget -> lower effort). The floor
+    is the smallest configured effort, so a budget below every cap maps to
+    the lowest effort instead of skipping levels."""
+    ordered = sorted(effort_budgets.items(), key=lambda kv: kv[1])
+    chosen = ordered[0][0]
+    for name, cap in ordered:
+        if cap <= budget:
+            chosen = name
+    return chosen
 
 
 class BudgetError(ValueError):
@@ -115,6 +129,15 @@ class Contract:
             raise BudgetError("reasoning_effort must be a supported effort string.")
         thinking = body.get("thinking")
         template = body.get("chat_template_kwargs")
+        if cfg.get("dialect", "native") == "effort_enum" and effort is None:
+            kwargs_effort = template.get("reasoning_effort") \
+                if isinstance(template, dict) else None
+            if isinstance(kwargs_effort, str) and kwargs_effort:
+                # A client speaking the dialect directly through template
+                # kwargs is honored, not silently overwritten.
+                effort = kwargs_effort
+                if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+                    raise BudgetError("reasoning_effort must be a supported effort string.")
         if (effort == "none"
                 or isinstance(thinking, dict) and thinking.get("type") == "disabled"
                 or isinstance(template, dict) and template.get("enable_thinking") is False):
@@ -134,6 +157,22 @@ class Contract:
                 raise BudgetError("Output budget must exceed reserve_content_tokens "
                     "when native reasoning budgeting is enabled.")
             native = min(native, available) if native is not None else available
+        if native is not None and cfg.get("dialect", "native") == "effort_enum":
+            # Dialect injection: the budget that the native computation
+            # selected maps onto the effort ladder. Both channels are
+            # written consistently (recipe accepts either; vLLM precedence
+            # then cannot disagree). thinking_token_budget is NEVER written
+            # — the client's own field stays verbatim and the backend sees
+            # only the enum.
+            chosen = effort_for_budget(native, cfg.get("effort_budgets", {}))
+            body["reasoning_effort"] = chosen
+            body.setdefault("chat_template_kwargs", {})["reasoning_effort"] = chosen
+            self.metadata["reasoning"] = {"dialect": "effort_enum",
+                "parameter": "reasoning_effort",
+                "requested_tokens": requested, "requested_effort": effort,
+                "forwarded_tokens": native, "forwarded_effort": chosen,
+                "source": source, "reserve_content_tokens": reserve}
+            return
         if native is not None:
             body["thinking_token_budget"] = native
             self.metadata["reasoning"] = {"parameter": "thinking_token_budget",
