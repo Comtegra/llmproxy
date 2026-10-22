@@ -142,12 +142,14 @@ async def _connect_backend(req, b_name, b_cfg):
         {"model": b_cfg.get("model") or b_name})
     b_start = time.monotonic()
     try:
-        ssl = None if b_cfg.get("verify_ssl", True) else False
+        # aiohttp 3.10 deprecates ws_connect(ssl=None): pass the switch
+        # explicitly (True verifies, like the HTTP endpoints' default).
+        ssl_verify = bool(b_cfg.get("verify_ssl", True))
         ws_backend = await app["client"].ws_connect(
             b_url,
             headers={"Authorization": "Bearer %s" % b_cfg["token"]},
             heartbeat=b_cfg.get("heartbeat", HEARTBEAT_DEFAULT),
-            ssl=ssl)
+            ssl=ssl_verify)
     except aiohttp.ServerTimeoutError as e:
         metrics.BACKEND_DURATION_SECONDS.labels(b_name).observe(
             time.monotonic() - b_start)
