@@ -1041,7 +1041,7 @@ class TestConfigValidation(unittest.IsolatedAsyncioTestCase):
                 meta = {"type": backend_type}
                 if backend_type == "decision":
                     meta.update(url="https://example.org", model="basal", device="a5000")
-                if backend_type == "conversion":
+                if backend_type in ("conversion", "realtime"):
                     meta.update(token="APP_TOKEN", device="a5000")
                 config.validate({"backends": {"m": meta}})
 
