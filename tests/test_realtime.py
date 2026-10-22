@@ -341,6 +341,21 @@ class TestRealtimeSession(RealtimeTestCase):
         await ws.close()
         self.assertAlmostEqual(await self.audio_seconds(), before)
 
+    async def test_idle_session_survives_the_http_read_timeout(self):
+        # The global timeout_read bounds HTTP response reads, not WebSocket
+        # sessions: a realtime session idles whenever the client pauses
+        # audio (the backend enforces its own idle limits), so it must
+        # outlive the HTTP timeout of this harness (1 s) without a ping.
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        try:
+            await asyncio.sleep(1.5)
+            await ws.send_str(json.dumps(
+                {"type": "session.update", "session": {}}))
+            msg = await ws.receive()
+            self.assertEqual(json.loads(msg.data)["type"], "session.update")
+        finally:
+            await ws.close()
+
     async def test_garbage_text_frame_is_still_forwarded(self):
         before = await self.audio_seconds()
         ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
