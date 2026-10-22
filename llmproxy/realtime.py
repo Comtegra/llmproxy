@@ -244,6 +244,11 @@ async def realtime(f_req):
                     # backend so it ends its session.
                     await asyncio.wait({down}, timeout=DRAIN_GRACE)
                     await ws_backend.close(code=ws_client.close_code or 1000)
+                    # Up can also end on a BACKEND error (its send failed)
+                    # with the client still connected: make sure the client
+                    # gets a close frame. When the disconnect was the
+                    # client's this is a no-op (aiohttp already closed it).
+                    await ws_client.close(code=INTERNAL_ERROR)
                 up.cancel()
                 try:
                     await asyncio.wait_for(
