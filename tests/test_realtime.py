@@ -6,12 +6,17 @@ set headers, so their key rides the handshake subprotocols
 (`Sec-WebSocket-Protocol: bearer, <key>`).
 """
 
+import json
 import unittest
 from unittest import mock
 
+import aiohttp
+import aiohttp.test_utils
 import aiohttp.web
 
 from llmproxy import auth, config
+
+from . import mockbackend
 
 
 class _App:
@@ -105,3 +110,80 @@ class TestRealtimeConfig(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(config.ConfigError):
                     self._validate(heartbeat=value)
+
+
+class MockBackendRealtimeTest(unittest.IsolatedAsyncioTestCase):
+    """The mock WS backend itself: the proxy-level tests sit on top of it.
+
+    The mock speaks the OpenAI Realtime transcription subset the real
+    backend speaks: token check first (error event + close 1008), scripted
+    completed events with usage seconds on commit, everything else echoed."""
+
+    async def asyncSetUp(self):
+        self.app = mockbackend.create_app()
+        self.server = aiohttp.test_utils.TestServer(self.app)
+        await self.server.start_server()
+        self.session = aiohttp.ClientSession()
+        self.url = "http://%s:%d" % (self.server.host, self.server.port)
+
+    async def asyncTearDown(self):
+        await self.session.close()
+        await self.server.close()
+
+    async def connect(self, token="mybackendtoken", **kwargs):
+        headers = {"Authorization": "Bearer %s" % token} if token else {}
+        return await self.session.ws_connect(self.url + "/v1/realtime",
+            headers=headers, **kwargs)
+
+    async def test_commit_answers_completed_with_usage(self):
+        ws = await self.connect()
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"],
+            "conversation.item.input_audio_transcription.completed")
+        self.assertEqual(evt["usage"], {"type": "duration", "seconds": 3.7})
+        await ws.close()
+
+    async def test_other_frames_are_echoed(self):
+        ws = await self.connect()
+        await ws.send_str(json.dumps(
+            {"type": "session.update", "session": {}}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"], "session.update")
+        await ws.close()
+
+    async def test_wrong_token_is_error_then_1008(self):
+        ws = await self.connect(token="nope")
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"], "error")
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1008)
+
+    async def test_max_sessions_closes_1013(self):
+        self.app["ws_control"]["max_sessions"] = True
+        ws = await self.connect()
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1013)
+
+    async def test_close_code_ends_the_session(self):
+        self.app["ws_control"]["close_code"] = 1000
+        self.app["ws_control"]["echo"] = False
+        ws = await self.connect()
+        await ws.send_str(json.dumps(
+            {"type": "input_audio_buffer.append", "audio": "QQ=="}))
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1000)
+
+    async def test_records_headers_and_model(self):
+        self.app["ws_control"]["usage_seconds"] = 2.5
+        ws = await self.connect(params={"model": "mymodel"})
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.receive()
+        await ws.close()
+        rec = self.app["ws_records"][0]
+        self.assertEqual(rec["headers"]["Authorization"],
+            "Bearer mybackendtoken")
+        self.assertEqual(rec["model"], "mymodel")
