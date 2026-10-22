@@ -11,7 +11,7 @@ from unittest import mock
 
 import aiohttp.web
 
-from llmproxy import auth
+from llmproxy import auth, config
 
 
 class _App:
@@ -72,3 +72,36 @@ class TestRequireToken(unittest.IsolatedAsyncioTestCase):
                 await auth.require_token(req, None)
         get_db.assert_not_called()
         self.assertIn("Incorrect API key", caught.exception.text)
+
+
+class TestRealtimeConfig(unittest.TestCase):
+    def _backends(self, **meta):
+        base = {"url": "https://example.test", "token": "t",
+            "device": "none", "type": "realtime"}
+        base.update(meta)
+        return {"myrealtime": base}
+
+    def _validate(self, **meta):
+        config.validate({"backends": self._backends(**meta)})
+
+    def test_accepts_realtime_backend(self):
+        self._validate()
+
+    def test_accepts_heartbeat(self):
+        self._validate(heartbeat=30)
+
+    def test_token_required(self):
+        for token in (None, "", "  "):
+            with self.subTest(token=token):
+                with self.assertRaises(config.ConfigError):
+                    self._validate(token=token)
+
+    def test_device_required(self):
+        with self.assertRaises(config.ConfigError):
+            self._validate(device=None)
+
+    def test_heartbeat_positive_number(self):
+        for value in (0, -5, "x", True):
+            with self.subTest(value=value):
+                with self.assertRaises(config.ConfigError):
+                    self._validate(heartbeat=value)

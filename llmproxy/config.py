@@ -14,7 +14,8 @@ class ConfigError(Exception):
 # Every backend must declare one of these as its ``type``. Each endpoint
 # handler passes the type it serves to proxy.request(), which rejects a model
 # of any other type before the request reaches the backend.
-BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion", "decision")
+BACKEND_TYPES = ("chat", "embedding", "transcription", "conversion",
+    "decision", "realtime")
 
 DECISION_LIMITS = {"max_questions": 16, "max_branches": 64,
     "max_response_bytes": 4 * 1024 * 1024}
@@ -112,6 +113,21 @@ def validate(cfg):
             for key in ("token", "device"):
                 if type(meta.get(key)) is not str or not meta[key].strip():
                     raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
+        if meta["type"] == "realtime":
+            # The token authenticates the proxy to the WebSocket backend; the
+            # device names the billed product (usage is metered per second;
+            # billing events follow a pending decision and key off it).
+            for key in ("token", "device"):
+                if type(meta.get(key)) is not str or not meta[key].strip():
+                    raise ConfigError('Backend "%s" %s must be a non-empty string' % (name, key))
+            if "heartbeat" in meta:
+                # WS keepalive ping interval, seconds; guards long sessions
+                # against silent half-open connections.
+                value = meta["heartbeat"]
+                if type(value) not in (int, float) or not math.isfinite(value) \
+                        or value <= 0:
+                    raise ConfigError(
+                        'Backend "%s" heartbeat must be finite and positive' % name)
         if "decision_limits" in meta:
             limits = meta["decision_limits"]
             if meta["type"] != "decision" or type(limits) is not dict:
