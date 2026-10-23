@@ -348,7 +348,10 @@ class TestRealtimeSession(RealtimeTestCase):
         await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
         await ws.close()
         async def metered():
-            while await self.audio_seconds() - before < 3.7:
+            # The counter accumulates float seconds across the suite
+            # (process-global by Prometheus nature), so the delta is
+            # compared with a rounding tolerance, never exactly.
+            while round(await self.audio_seconds() - before, 6) < 3.7:
                 await asyncio.sleep(0.05)
         await asyncio.wait_for(metered(), 5)
 
@@ -361,9 +364,58 @@ class TestRealtimeSession(RealtimeTestCase):
         await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
         await ws.close()
         async def metered():
-            while await self.audio_seconds() - before < 7.4:
+            # Float accumulation across the suite: compare with tolerance.
+            while round(await self.audio_seconds() - before, 6) < 7.4:
                 await asyncio.sleep(0.05)
         await asyncio.wait_for(metered(), 5)
+
+
+class TestRealtimeBilling(RealtimeTestCase):
+    """Per-segment ONEOFF billing on the usage hook: each completed segment
+    is billed the moment it lands (never a lump at session end), with the
+    same product shape as offline transcription."""
+
+    async def test_completed_segments_are_billed_incrementally(self):
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"],
+            "conversation.item.input_audio_transcription.completed")
+        # The first segment is billed while the session is still live:
+        # a per-session lump at disconnect would never show up here.
+        self.assertListEqual(await self.get_events(expect=1), [
+            {"product": "myrealtime/none/transcription", "quantity": 3.7},
+        ])
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["usage"]["seconds"], 3.7)
+        await ws.close()
+        # One event per segment (2 x 3.7), never one event per session (7.4).
+        self.assertListEqual(await self.get_events(expect=2), [
+            {"product": "myrealtime/none/transcription", "quantity": 3.7},
+            {"product": "myrealtime/none/transcription", "quantity": 3.7},
+        ])
+
+    async def test_inflight_segment_is_billed_after_client_disconnect(self):
+        # The client hangs up right after committing: the completed event
+        # is in flight and the drain grace must bill it, like it meters it.
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        await ws.close()
+        self.assertListEqual(await self.get_events(expect=1), [
+            {"product": "myrealtime/none/transcription", "quantity": 3.7},
+        ])
+
+    async def test_non_completed_frames_are_not_billed(self):
+        # Echoed frames carry no usage: billing, like metering, only ever
+        # touches completed events.
+        ws = await self.client.ws_connect("/v1/realtime", headers=self.AUTH)
+        await ws.send_str(json.dumps(
+            {"type": "session.update", "session": {}}))
+        self.assertEqual(json.loads((await ws.receive()).data)["type"],
+            "session.update")
+        await ws.close()
+        self.assertListEqual(await self.get_events(), [])
 
 
 class TestRealtimeRateLimits(RealtimeTestCase):

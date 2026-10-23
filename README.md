@@ -255,13 +255,14 @@ directions and adds the gateway around them:
   `token`) is a configuration fault — the client sees close 1011 and the
   log gets a CRITICAL naming the backend; the backend's session limit
   (close 1013) passes through as 1013.
-* **Usage metering, not billing (yet)** — the proxy sniffs
-  `conversation.item.input_audio_transcription.completed` events and counts
-  their `usage.seconds` in `llmproxy_audio_seconds_total{model}`.
-  Billing events are deliberately **not written yet** (per-segment vs
-  per-session is a pending decision; the sniffing hook is the single call
-  site they will plug into). Audio the client never committed is never
-  metered.
+* **Usage metering and billing** — each
+  `conversation.item.input_audio_transcription.completed` event is billed as
+  its own ONEOFF event (`MODEL/DEVICE/transcription`, the same product shape
+  as offline transcription) before it is forwarded to the client, and its
+  `usage.seconds` is counted in `llmproxy_audio_seconds_total{model}`.
+  Billing per segment, not per session: an hours-long call never loses more
+  than the segment that was in flight when the worker died. Audio the client
+  never committed is never billed.
 * **Timeouts** — the global `timeout_read` does not bound a session (the
   backend enforces its own session/idle limits). `heartbeat` (default 30 s)
   is the WebSocket keepalive to the backend. A disconnected client gets a
@@ -286,8 +287,8 @@ health_path = "v1/health"  # optional: the STT pod serves health under /v1
 
 **Upgrading:** a `realtime` backend needs a non-empty `token` (authenticates
 the proxy to the backend) and `device` (names the billed product); the proxy
-refuses to start otherwise. Sessions are not billed until the pending
-billing decision lands — monitor `llmproxy_audio_seconds_total`.
+refuses to start otherwise. Sessions bill one ONEOFF event per completed
+segment — monitor `llmproxy_audio_seconds_total` and the billing stream.
 
 ## Monitoring (Prometheus metrics)
 
