@@ -37,6 +37,7 @@ Each backend must define `type`, which decides the endpoints it is served on:
 | `chat` | `/v1/chat/completions`, `/v1/completions`, `/v1/messages`, `/v1/responses` |
 | `embedding` | `/v1/embeddings` |
 | `transcription` | `/v1/audio/transcriptions` |
+| `realtime` | `/v1/realtime` (WebSocket) |
 | `conversion` | `/v1/files/convert` |
 | `decision` | `/v1/systemone` (native), `/v1/decisions` (OpenAI Decisions subset) |
 
@@ -224,6 +225,70 @@ is a `400`.
   synchronously (the work is not billed) or, with
   `MARKER_DATALAB_COMPAT_SYNC=False`, queues the job under a content-hash id
   the proxy refuses.
+
+## Realtime transcription (/v1/realtime)
+
+`GET /v1/realtime` upgrades to a WebSocket and proxies a realtime
+speech-to-text backend (`type = "realtime"`). The backend speaks the OpenAI
+Realtime transcription subset (session.update, input_audio_buffer.*, partial
+and completed transcript events); the proxy forwards frames verbatim in both
+directions and adds the gateway around them:
+
+* **Authentication** — the same API keys as the HTTP endpoints, via the
+  `Authorization: Bearer` header (the standard `require_auth` path; there is
+  no WebSocket-specific credential channel). The client's key is never
+  forwarded to the backend: the backend sees only the configured backend
+  `token`.
+* **Model routing** — `?model=` is optional (OpenAI SDKs send it anyway):
+  absent means the single configured realtime backend and is a `400` with
+  `param: model` when more than one is configured; an unknown model gets
+  `404` `model_not_found`, a model of another type `404`
+  `model_not_supported` — both before any backend connection. The backend
+  config's optional `model` overrides the model id sent to the backend
+  (the real model the deployment expects), like on chat backends.
+* **Rate limits** — the usual `[backends.X.rate_limit]` semantics, scoped to
+  the session: `rpm` bounds handshakes, `concurrency` bounds parallel
+  sessions per user+model and is held for the whole session (including the
+  short drain after the client disconnects).
+* **Errors** — handshake failures are ordinary HTTP errors (401/400/404/429).
+  In session: a backend that rejects the proxy (close 1008, e.g. a wrong
+  `token`) is a configuration fault — the client sees close 1011 and the
+  log gets a CRITICAL naming the backend; the backend's session limit
+  (close 1013) passes through as 1013.
+* **Usage metering and billing** — each
+  `conversation.item.input_audio_transcription.completed` event is billed as
+  its own ONEOFF event (`MODEL/DEVICE/transcription`, the same product shape
+  as offline transcription) before it is forwarded to the client, and its
+  `usage.seconds` is counted in `llmproxy_audio_seconds_total{model}`.
+  Billing per segment, not per session: an hours-long call never loses more
+  than the segment that was in flight when the worker died. Audio the client
+  never committed is never billed.
+* **Timeouts** — the global `timeout_read` does not bound a session (the
+  backend enforces its own session/idle limits). `heartbeat` (default 30 s)
+  is the WebSocket keepalive to the backend. A disconnected client gets a
+  short drain grace (~2 s) so the backend's last reply is still metered,
+  then the backend session is closed.
+* **Provenance** — the 101 carries `X-AI-Generated` (transcripts derive from
+  the input audio — the Art. 50(2) no-substantial-alteration carve-out — so
+  marking is header-only, like on `/v1/audio/transcriptions`).
+
+Example backend:
+
+```toml
+[backends.parakeet-realtime]
+url = "https://parakeet.example.cgc-krk-01.comtegra.cloud"
+token = "APP_TOKEN"        # the backend's endpoint key (bearer)
+device = "a5000"           # billed product: parakeet-realtime/a5000/transcription
+type = "realtime"
+model = "nvidia/parakeet-tdt-0.6b-v3"  # optional: the model id the backend expects
+heartbeat = 30             # optional: WS keepalive ping, seconds
+health_path = "v1/health"  # optional: the STT pod serves health under /v1
+```
+
+**Upgrading:** a `realtime` backend needs a non-empty `token` (authenticates
+the proxy to the backend) and `device` (names the billed product); the proxy
+refuses to start otherwise. Sessions bill one ONEOFF event per completed
+segment — monitor `llmproxy_audio_seconds_total` and the billing stream.
 
 ## Monitoring (Prometheus metrics)
 
