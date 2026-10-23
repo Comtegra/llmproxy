@@ -1,4 +1,4 @@
-"""Realtime transcription: a WebSocket proxy with usage metering.
+"""Realtime transcription: a WebSocket proxy with per-segment billing.
 
 The client speaks the OpenAI Realtime transcription subset to
 ``/v1/realtime``; the proxy authenticates the API key (the same
@@ -8,13 +8,15 @@ with the backend's own token and pumps frames both ways. The client's key
 never reaches the backend: it sees only the configured ``token``.
 
 Downstream frames are sniffed for ``conversation.item.input_audio_transcription.completed``
-events so ``usage.seconds`` lands in ``llmproxy_audio_seconds_total``.
-Billing events are deliberately NOT written yet: the per-segment vs
-per-session decision is pending, and the sniff hook is the single call site
-they will plug into.
+events so their ``usage.seconds`` lands both in ``llmproxy_audio_seconds_total``
+and in one ONEOFF billing event per segment (``MODEL/DEVICE/transcription``:
+the same product shape as offline transcription). Billing per segment, not
+per session: an hours-long call must never lose more than the segment that
+was in flight when the worker died.
 """
 
 import asyncio
+import decimal
 import json
 import time
 
@@ -22,7 +24,7 @@ import aiohttp
 import aiohttp.web
 import yarl
 
-from . import auth, errors, metrics, proxy, provenance, ratelimit
+from . import auth, billing, errors, metrics, proxy, provenance, ratelimit
 
 COMPLETED = "conversation.item.input_audio_transcription.completed"
 
@@ -95,13 +97,17 @@ async def _forward_up(ws_client, ws_backend):
 
 
 async def _forward_down(ws_backend, ws_client, on_completed):
-    """Backend -> client frames, sniffed for the usage hook on the way."""
+    """Backend -> client frames, sniffed for the usage hook on the way.
+
+    The hook (metering + ONEOFF billing) runs before the frame is
+    forwarded, so like on the HTTP endpoints a segment is only ever
+    delivered billed."""
     async for msg in ws_backend:
         if msg.type == aiohttp.WSMsgType.TEXT:
             try:
                 evt = json.loads(msg.data)
                 if isinstance(evt, dict) and evt.get("type") == COMPLETED:
-                    on_completed(evt)
+                    await on_completed(evt)
             except ValueError:
                 pass  # not JSON: still forwarded, the pipe stays transparent
             try:
@@ -173,13 +179,14 @@ async def realtime(f_req):
             openai_type="authentication_error",
             anthropic_type="authentication_error") from exc
 
-    # Release the request's database connection before the session starts:
-    # the auth row is already in hand and a session can outlive many
-    # connection generations. close_db would otherwise hold it for the
-    # whole session (on SQLite, a dedicated connection and worker thread).
-    db = f_req.pop("db", None)
-    if db is not None:
-        await db.close()
+    # The request's database connection stays for the whole session: auth
+    # already opened it (a cache hit means billing opens it on the first
+    # completed segment) and every segment bills through it, while the
+    # close_db middleware owns the end-of-session close. On SQLite that is
+    # one dedicated connection per session, bounded by the concurrency
+    # slot -- the release-at-handshake that predated billing would instead
+    # make every segment pay a blocking thread start inside its latency.
+    # On Mongo it is the process-global client either way.
 
     b_name, b_cfg = _select_backend(f_req)
 
@@ -197,14 +204,31 @@ async def realtime(f_req):
                 ws_client.headers.update(provenance.headers(app["config"]))
                 await ws_client.prepare(f_req)
 
-                def on_completed(evt):
+                async def on_completed(evt):
                     usage = evt.get("usage") or {}
                     seconds = usage.get("seconds")
                     if isinstance(seconds, (int, float)) and seconds > 0:
+                        # Bill FIRST, in the offline order (record, log,
+                        # metric): one ONEOFF event per completed segment,
+                        # the same product shape as /v1/audio/transcriptions
+                        # (Decimal keeps the fractional-seconds path
+                        # identical on Mongo).
+                        await billing.record(f_req, user, {
+                            "%s/%s/transcription" % (b_name, b_cfg["device"]):
+                                decimal.Decimal(str(seconds)),
+                        })
+                        # billing.record reuses the session's cached
+                        # connection (get_db); close_db closes it when the
+                        # session ends.
+                        app.logger.info(
+                            "Client used: %.3f s of %s (realtime)",
+                            float(seconds), b_name)
+                        # The metric is the hook's LAST side effect (as in
+                        # audio.py): "metered" always means "billed", so the
+                        # drain tests that poll this metric never race an
+                        # in-flight write against their teardown.
                         metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(
                             float(seconds))
-                        # billing deferred: per-segment vs per-session is a
-                        # pending decision; this is the single hook site.
 
                 up = asyncio.create_task(_forward_up(ws_client, ws_backend))
                 down = asyncio.create_task(
