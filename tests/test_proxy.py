@@ -41,9 +41,14 @@ class LLMProxyAppTestCase(aiohttp.test_utils.AioHTTPTestCase):
         await super().asyncSetUp()
 
     async def asyncTearDown(self):
+        # Close the client (and with it the server) BEFORE unlinking the
+        # database file: the server's graceful shutdown waits out in-flight
+        # handlers (handler_cancellation=False -- a billing-critical pin),
+        # and a handler that still holds its request-scoped db connection
+        # would otherwise keep the file locked while the test unlinks it.
+        await super().asyncTearDown()
         os.close(self.db_fd)
         os.unlink(self.db_path)
-        await super().asyncTearDown()
 
     async def get_application(self):
         self.db_fd, self.db_path = tempfile.mkstemp()
