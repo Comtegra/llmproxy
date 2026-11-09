@@ -13,7 +13,7 @@ import yarl
 
 from . import (
     audio, auth, budget, chat, config, decision_openai, decisions, embeddings,
-    files, messages, metrics, ratelimit, responses,
+    files, messages, metrics, ratelimit, realtime, responses,
 )
 from .db import get_db, shutdown_all
 
@@ -181,6 +181,7 @@ async def create_app(cfg):
         aiohttp.web.get("/v1/models/{id}", chat.model),
         aiohttp.web.post("/v1/embeddings", embeddings.embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", audio.transcriptions),
+        aiohttp.web.get("/v1/realtime", realtime.realtime),
         aiohttp.web.post("/v1/files/convert", files.convert),
         # No HEAD: a poll may claim and bill the result, which a HEAD (no
         # body) must not do.
