@@ -185,6 +185,110 @@ This bounds reasoning only when the backend actually honors its sampling
 parameter/parser boundaries; transition tokens, context exhaustion and output
 quality still matter. It does not guarantee useful final content on every task.
 
+## Reasoning effort dialects (`effort_enum`) — GLM-5.3-Flash
+
+Some backends have **no token-level thinking budget at all**. GLM-5.3-Flash's
+chat template controls reasoning only through the enum kwargs
+`reasoning_effort` (`'low'` and `'high'`; anything else — including an
+omitted value — maps to `'max'`) and `clear_thinking`, accepted via the
+top-level `reasoning_effort` field or `chat_template_kwargs.reasoning_effort`.
+Where the serving stack additionally enforces a top-level
+`thinking_token_budget` natively, the client's verbatim field takes
+precedence over the injected enum; the dialect never writes
+`thinking_token_budget` itself. The enum stays the effort-shaped control
+and remains an approximation.
+
+The `effort_enum` dialect keeps the entire native computation and changes
+only the final injection:
+
+```toml
+[backends.glm-53f.reasoning]
+native_budget = true          # required: the token-budget computation IS the native path
+endpoints = ["chat"]
+reserve_content_tokens = 64   # still active: the 400-edge is preserved
+effort_budgets = { low = 64, high = 1024 }   # ladder thresholds; no medium on flash
+dialect = "effort_enum"       # default "native" = today's behavior, byte-identical
+```
+
+`dialect = "effort_enum"` requires `native_budget = true` and a non-empty
+`effort_budgets` table; anything other than `native`/`effort_enum` is
+rejected. `native_budget = true` stays REQUIRED with
+`dialect = "effort_enum"`: it gates the token-budget computation
+(precedence, reserve math, the 400-edges and the metadata). Phase 2
+therefore runs BOTH live paths — the enum for effort selection, and the
+native binding for an exact client `thinking_token_budget`. The proxy
+computes the token budget **exactly as in native mode**
+(same precedence, same reserve math, same 400-edges) and then maps it onto the
+highest configured effort level whose cap fits the budget:
+
+```python
+ordered = sorted(effort_budgets.items(), key=lambda kv: kv[1])
+chosen = ordered[0][0]                       # floor = smallest configured effort
+for name, cap in ordered:
+    if cap <= budget:
+        chosen = name
+```
+
+The selected effort is injected on **both channels** —
+`reasoning_effort` top-level AND `chat_template_kwargs.reasoning_effort`
+(dict-merged with any sibling kwargs; a client that already speaks the
+dialect through `chat_template_kwargs.reasoning_effort` is honored as the
+effort input when the top-level field is absent, and a top-level field wins
+over a disagreeing kwargs value). `thinking_token_budget` is never written in
+dialect mode; a client's own field is forwarded verbatim and takes
+precedence as described above. The proxy never injects a value outside
+the configured effort keys (never `max`).
+
+**The enum is an approximation: the model may think longer or shorter than
+the level implies; there is NO exact-token guarantee for the ENUM in
+dialect mode.** A client `thinking_token_budget` is forwarded verbatim,
+and where the serving stack enforces it natively it takes precedence
+over the selected effort. `reserve_content_tokens` keeps exactly two
+hard guarantees:
+(1) an output limit at/below reserve is rejected with 400 (unchanged edge),
+and (2) the computed budget — hence the selected effort — is capped at
+`forwarded - reserve`. Degradation is intended behavior: an effort whose cap
+does not fit the affordable budget maps DOWN to the highest fitting level
+(e.g. requested `high` with only 960 affordable tokens maps to `low`), which
+protects the content budget instead of honoring an unaffordable effort.
+
+Precedence (chat only, enforce only):
+
+| Input | Effect |
+| --- | --- |
+| client `thinking_token_budget` (positive int) | selects the budget; the ladder then picks the level (client wins over any effort) |
+| `reasoning_effort` (top-level) / `chat_template_kwargs.reasoning_effort` when the top-level field is absent | `effort_budgets[effort]` (or `default_effort`) selects the budget |
+| none of the above | the budget is `forwarded - reserve` (pure reserve math) |
+| then, always | the budget is capped at `forwarded - reserve`; a limit at/below reserve is a 400 |
+
+Dialect metadata is reported on chat only, in `llmproxy.budget.reasoning`:
+
+```json
+{
+  "dialect": "effort_enum",
+  "parameter": "reasoning_effort",
+  "requested_tokens": 16,
+  "requested_effort": "low",
+  "forwarded_tokens": 16,
+  "forwarded_effort": "low",
+  "source": "client",
+  "reserve_content_tokens": 64
+}
+```
+
+`forwarded_tokens` is the computed budget that SELECTED the effort level —
+it is not a parameter forwarded to the backend. `source` keeps the native
+semantics (`client` only for an explicit client `thinking_token_budget`,
+else `proxy`). The catalog's `reasoning` block always carries a `dialect`
+key (`"native"` by default); `effort_enum` there proves the dialect source
+is live, while its absence proves the baseline (pre-dialect) source.
+
+This is the dialect's reason to exist: a bounded request that would
+otherwise spend its whole output budget on thinking (length stop, empty
+final content) gets a ladder-injected effort level instead and is
+expected to produce final content — with reasoning bounded only
+approximately (relational, never an exact-token claim).
+
 ## Verification and live evidence
 
 Run the standard suite (no network credentials needed):

@@ -183,9 +183,13 @@ def _validate_reasoning(options, name):
     prefix = 'Backend "%s" reasoning' % name
     if type(options) is not dict:
         raise ConfigError("%s must be a table" % prefix)
-    allowed = {"native_budget", "endpoints", "reserve_content_tokens", "effort_budgets", "default_effort"}
+    allowed = {"native_budget", "endpoints", "reserve_content_tokens",
+        "effort_budgets", "default_effort", "dialect"}
     if set(options) - allowed:
         raise ConfigError("%s contains unknown options" % prefix)
+    if "dialect" in options and (type(options["dialect"]) is not str
+            or options["dialect"] not in ("native", "effort_enum")):
+        raise ConfigError("%s.dialect must be native or effort_enum" % prefix)
     if "native_budget" in options and type(options["native_budget"]) is not bool:
         raise ConfigError("%s.native_budget must be a boolean" % prefix)
     endpoints = options.get("endpoints", ["chat"])
@@ -206,6 +210,14 @@ def _validate_reasoning(options, name):
     if "default_effort" in options and (type(options["default_effort"]) is not str
             or options["default_effort"] not in efforts):
         raise ConfigError("%s.default_effort requires a matching effort_budgets entry" % prefix)
+    if options.get("dialect", "native") == "effort_enum":
+        # The effort-enum dialect reuses the native token-budget
+        # computation VERBATIM (precedence, reserve math, 400-edges); only
+        # the final injection swaps thinking_token_budget for the enum.
+        if not options.get("native_budget", False):
+            raise ConfigError("%s.effort_enum requires native_budget" % prefix)
+        if not efforts:
+            raise ConfigError("%s.effort_enum requires effort_budgets" % prefix)
 
 
 def load(path=None, create=False):

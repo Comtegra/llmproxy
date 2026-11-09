@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import time
+import tomllib
 import unittest
 import warnings
 from unittest import mock
@@ -182,6 +183,309 @@ class TestBudgetConfig(unittest.TestCase):
         for cfg in cases:
             with self.subTest(cfg=cfg), self.assertRaises(config.ConfigError):
                 config.validate(cfg)
+
+
+FLASH_REASONING = {"native_budget": True, "endpoints": ["chat"],
+    "reserve_content_tokens": 64,
+    "effort_budgets": {"low": 64, "high": 1024},
+    "dialect": "effort_enum"}
+
+
+class EffortEnumDialectTest(unittest.TestCase):
+    """GLM-5.3-Flash effort_enum dialect: the token-budget computation is
+    the native one VERBATIM; only the final injection swaps the
+    thinking_token_budget parameter for the reasoning_effort enum."""
+
+    def test_ladder_exact_values(self):
+        ladder = {"low": 64, "high": 1024}
+        for tokens, expected in ((16, "low"), (64, "low"), (100, "low"),
+                (500, "low"), (1024, "high"), (2936, "high")):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(budget.effort_for_budget(tokens, ladder),
+                    expected)
+
+    def test_injection_sets_both_channels_and_preserves_kwargs(self):
+        body = {"max_tokens": 128, "reasoning_effort": "low",
+            "chat_template_kwargs": {"custom": "keep"}}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["chat_template_kwargs"],
+            {"custom": "keep", "reasoning_effort": "low"})
+        self.assertNotIn("thinking_token_budget", body)
+        self.assertEqual(c.metadata["reasoning"], {"dialect": "effort_enum",
+            "parameter": "reasoning_effort", "requested_tokens": None,
+            "requested_effort": "low", "forwarded_tokens": 64,
+            "forwarded_effort": "low", "source": "proxy",
+            "reserve_content_tokens": 64})
+
+    def test_client_token_budget_takes_precedence_and_stays_verbatim(self):
+        body = {"max_tokens": 128, "reasoning_effort": "low",
+            "thinking_token_budget": 16}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        # The client's own field is never written in dialect mode (vLLM
+        # ignores it on flash — the enum is the only live control).
+        self.assertEqual(body["thinking_token_budget"], 16)
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["chat_template_kwargs"]["reasoning_effort"],
+            "low")
+        self.assertEqual(c.metadata["reasoning"]["requested_tokens"], 16)
+        self.assertEqual(c.metadata["reasoning"]["forwarded_tokens"], 16)
+        self.assertEqual(c.metadata["reasoning"]["forwarded_effort"], "low")
+        self.assertEqual(c.metadata["reasoning"]["source"], "client")
+
+    def test_effort_high_degrades_to_low_when_budget_does_not_fit(self):
+        body = {"max_tokens": 128, "reasoning_effort": "high"}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        # min(1024, 128-64) == 64 -> the ladder floor wins; degradation
+        # protects content instead of honoring an unaffordable effort.
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["chat_template_kwargs"]["reasoning_effort"],
+            "low")
+        self.assertEqual(c.metadata["reasoning"]["forwarded_tokens"], 64)
+        self.assertEqual(c.metadata["reasoning"]["forwarded_effort"], "low")
+        self.assertEqual(c.metadata["reasoning"]["requested_effort"], "high")
+        self.assertEqual(c.metadata["reasoning"]["source"], "proxy")
+
+    def test_no_effort_and_no_budget_uses_pure_reserve_math(self):
+        body = {"max_tokens": 128}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertEqual(c.metadata["reasoning"]["forwarded_tokens"], 64)
+        self.assertEqual(c.metadata["reasoning"]["forwarded_effort"], "low")
+        self.assertIsNone(c.metadata["reasoning"]["requested_tokens"])
+        self.assertIsNone(c.metadata["reasoning"]["requested_effort"])
+        self.assertEqual(c.metadata["reasoning"]["source"], "proxy")
+
+    def test_injected_default_selects_high(self):
+        body = {}
+        policy = {"mode": "enforce", "default_max_tokens": 8192,
+            "ceiling": 32768, "apply_default": True, "clamp": True}
+        c = contract(body, policy=policy,
+            reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertEqual(c.metadata["reasoning"]["forwarded_tokens"], 8128)
+        self.assertEqual(c.metadata["reasoning"]["forwarded_effort"], "high")
+        self.assertEqual(c.metadata["reasoning"]["source"], "proxy")
+
+    def test_kwargs_effort_honored_when_top_level_absent(self):
+        body = {"max_tokens": 128,
+            "chat_template_kwargs": {"reasoning_effort": "low",
+                "custom": "keep"}}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertEqual(c.metadata["reasoning"]["requested_effort"], "low")
+        self.assertEqual(c.metadata["reasoning"]["forwarded_effort"], "low")
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["chat_template_kwargs"],
+            {"reasoning_effort": "low", "custom": "keep"})
+
+    def test_top_level_effort_wins_over_disagreeing_kwargs(self):
+        body = {"max_tokens": 128, "reasoning_effort": "low",
+            "chat_template_kwargs": {"reasoning_effort": "high"}}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertEqual(c.metadata["reasoning"]["requested_effort"], "low")
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["chat_template_kwargs"]["reasoning_effort"],
+            "low")
+
+    def test_dialect_early_outs_leave_reasoning_unchanged(self):
+        for body in ({"max_tokens": 128, "reasoning_effort": "none"},
+                {"max_tokens": 128, "thinking": {"type": "disabled"}},
+                {"max_tokens": 128,
+                    "chat_template_kwargs": {"enable_thinking": False}},
+                {"max_tokens": 128,
+                    "chat_template_kwargs": {"reasoning_effort": "none"}}):
+            with self.subTest(body=body):
+                original = copy.deepcopy(body)
+                c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+                self.assertNotIn("reasoning", c.metadata)
+                self.assertEqual(body, original)
+
+    def test_dialect_400_edges_preserved(self):
+        for body in ({"max_tokens": 64}, {"max_tokens": 32},
+                {"max_tokens": 128, "thinking_token_budget": 0},
+                {"max_tokens": 128, "reasoning_effort": "bogus"},
+                {"max_tokens": 128,
+                    "chat_template_kwargs": {"reasoning_effort": "bogus"}}):
+            with self.subTest(body=body), self.assertRaises(budget.BudgetError):
+                contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+
+    def test_empty_kwargs_effort_is_not_an_effort_input(self):
+        body = {"max_tokens": 128,
+            "chat_template_kwargs": {"reasoning_effort": ""}}
+        c = contract(body, reasoning=copy.deepcopy(FLASH_REASONING))
+        self.assertIsNone(c.metadata["reasoning"]["requested_effort"])
+        self.assertEqual(c.metadata["reasoning"]["forwarded_tokens"], 64)
+
+    def test_native_metadata_and_injection_stay_byte_identical(self):
+        native = {"native_budget": True, "endpoints": ["chat"],
+            "reserve_content_tokens": 64,
+            "effort_budgets": {"low": 64, "high": 1024}}
+        body = {"max_tokens": 128, "reasoning_effort": "low"}
+        c = contract(body, reasoning=native)
+        self.assertEqual(body["thinking_token_budget"], 64)
+        # The client's effort field stays verbatim; no kwargs are created.
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertNotIn("chat_template_kwargs", body)
+        self.assertEqual(c.metadata["reasoning"],
+            {"parameter": "thinking_token_budget", "requested_tokens": None,
+                "forwarded_tokens": 64, "source": "proxy",
+                "reserve_content_tokens": 64})
+        self.assertNotIn("dialect", c.metadata["reasoning"])
+
+    def test_dialect_config_validation_matrix(self):
+        output_budget = {"mode": "enforce", "default_max_tokens": 8192,
+            "ceiling": 32768, "apply_default": True, "clamp": True}
+
+        def backend(reasoning):
+            return {"type": "chat", "output_budget": dict(output_budget),
+                "reasoning": reasoning}
+
+        config.validate({"backends": {"m": backend(dict(FLASH_REASONING))}})
+        config.validate({"backends": {"m": backend(
+            {"native_budget": True, "endpoints": ["chat"],
+                "reserve_content_tokens": 64,
+                "effort_budgets": {"low": 64}})}})
+        config.validate({"backends": {"m": backend(
+            {"native_budget": True, "endpoints": ["chat"],
+                "reserve_content_tokens": 64,
+                "effort_budgets": {"low": 64}, "dialect": "native"})}})
+        for reasoning in ({"dialect": "tokens"},
+                {"dialect": True},
+                {"dialect": None},
+                {"dialect": "effort_enum"},
+                {"dialect": "effort_enum", "native_budget": True},
+                {"dialect": "effort_enum", "native_budget": True,
+                    "effort_budgets": {}, "endpoints": ["chat"]}):
+            with self.subTest(reasoning=reasoning), \
+                    self.assertRaises(config.ConfigError):
+                config.validate({"backends": {"m": {"type": "chat",
+                    "output_budget": dict(output_budget),
+                    "reasoning": reasoning}}})
+
+    def test_catalog_reports_dialect_always(self):
+        backend = {"output_budget": copy.deepcopy(POLICY)}
+        self.assertEqual(budget.catalog({"budget": {"enabled": True}},
+            backend)["output_budget"]["reasoning"]["dialect"], "native")
+        backend["reasoning"] = copy.deepcopy(FLASH_REASONING)
+        self.assertEqual(budget.catalog({"budget": {"enabled": True}},
+            backend)["output_budget"]["reasoning"]["dialect"], "effort_enum")
+
+    def test_glm53f_phase_tomls_validate(self):
+        """Both glm53f phase configs (plan section 3.3, inline literals —
+        self-contained) must parse and validate: phase 1 (baseline source)
+        carries NO dialect key; phase 2 adds exactly mode/native_budget/
+        dialect and activates the effort_enum dialect."""
+        phase1 = """
+# llmproxy - GLM-5.3-Flash test stack - ROUND 1 (budget OBSERVE; baseline source @ b14631f)
+log_level = "INFO"
+host = "0.0.0.0"
+port = 8080
+timeout_connect = 10
+timeout_read = 60
+http_origin = "*"
+
+[metrics]
+enabled = true
+path = "/metrics"
+
+[provenance]
+enabled = true
+generator = "comtegra-llmproxy"
+
+[db]
+uri = "sqlite:///models/llmproxy/db.sqlite"
+
+[budget]
+enabled = true
+echo_headers = true
+echo_body = true
+
+[backends.glm-53f]
+url = "@@VLLM_URL@@"
+token = "@@VLLM_API_KEY@@"
+device = "b200"
+type = "chat"
+model = "glm-53f-nvfp4"
+max_model_len = 131072
+timeout = 300
+
+[backends.glm-53f.output_budget]
+mode = "observe"
+default_max_tokens = 8192
+ceiling = 32768
+apply_default = true
+clamp = true
+backend_default_max_tokens = 32000
+
+[backends.glm-53f.reasoning]
+native_budget = false
+endpoints = ["chat"]
+reserve_content_tokens = 64
+effort_budgets = { low = 64, high = 1024 }
+"""
+        phase2 = """
+# llmproxy - GLM-5.3-Flash test stack - ROUND 2 (budget ENFORCE; dialect source)
+log_level = "INFO"
+host = "0.0.0.0"
+port = 8080
+timeout_connect = 10
+timeout_read = 60
+http_origin = "*"
+
+[metrics]
+enabled = true
+path = "/metrics"
+
+[provenance]
+enabled = true
+generator = "comtegra-llmproxy"
+
+[db]
+uri = "sqlite:///models/llmproxy/db.sqlite"
+
+[budget]
+enabled = true
+echo_headers = true
+echo_body = true
+
+[backends.glm-53f]
+url = "@@VLLM_URL@@"
+token = "@@VLLM_API_KEY@@"
+device = "b200"
+type = "chat"
+model = "glm-53f-nvfp4"
+max_model_len = 131072
+timeout = 300
+
+[backends.glm-53f.output_budget]
+mode = "enforce"
+default_max_tokens = 8192
+ceiling = 32768
+apply_default = true
+clamp = true
+backend_default_max_tokens = 32000
+
+[backends.glm-53f.reasoning]
+native_budget = true
+endpoints = ["chat"]
+reserve_content_tokens = 64
+effort_budgets = { low = 64, high = 1024 }
+dialect = "effort_enum"
+"""
+        cfg1, cfg2 = tomllib.loads(phase1), tomllib.loads(phase2)
+        config.validate(cfg1)
+        config.validate(cfg2)
+        reasoning1 = cfg1["backends"]["glm-53f"]["reasoning"]
+        reasoning2 = cfg2["backends"]["glm-53f"]["reasoning"]
+        self.assertNotIn("dialect", reasoning1,
+            "phase 1 runs the BASELINE source: no dialect key")
+        self.assertEqual(reasoning2["dialect"], "effort_enum")
+        # The only reasoning-table diff between the phases is
+        # native_budget + the added dialect line (mode flips in
+        # output_budget); everything else is byte-equal.
+        self.assertEqual(
+            {k: v for k, v in reasoning1.items()
+                if k not in ("native_budget", "dialect")},
+            {k: v for k, v in reasoning2.items()
+                if k not in ("native_budget", "dialect")})
 
 
 class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
@@ -453,3 +757,135 @@ class TestBudgetHTTP(aiohttp.test_utils.AioHTTPTestCase):
                 model="public", input="hi", stream=True)]
             self.assertEqual(events[-1].type, "response.incomplete")
         self.assertEqual(len(await self.events(8)), 8)
+
+
+class TestBudgetDialectHTTP(aiohttp.test_utils.AioHTTPTestCase):
+    """Effort-enum dialect end to end through the in-process proxy: chat
+    injects reasoning_effort on both channels; the other three protocols
+    carry no reasoning metadata; billing is unaffected; the reload
+    kill-switch stops all injection."""
+
+    async def asyncSetUp(self):
+        warnings.simplefilter("ignore", aiohttp.web.NotAppKeyWarning)
+        auth.flush_cache()
+        self.received = []
+        upstream = aiohttp.web.Application()
+
+        async def backend_handler(req):
+            body = await req.json()
+            self.received.append(body)
+            chat = req.path in ("/v1/chat/completions", "/v1/completions")
+            usage = {"prompt_tokens": 3, "completion_tokens": 10,
+                "completion_tokens_details": {"reasoning_tokens": 8}} if chat else {
+                "input_tokens": 3, "output_tokens": 10,
+                "output_tokens_details": {"reasoning_tokens": 8}}
+            if req.path == "/v1/responses":
+                result = {"status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "output": [], "usage": usage}
+            elif req.path == "/v1/messages":
+                result = {"stop_reason": "max_tokens", "content": [],
+                    "usage": usage}
+            elif req.path == "/v1/completions":
+                result = {"choices": [{"index": 0, "text": "42",
+                    "finish_reason": "length"}], "usage": usage}
+            else:
+                result = {"choices": [{"index": 0,
+                    "message": {"content": "42"},
+                    "finish_reason": "length"}], "usage": usage}
+            return aiohttp.web.Response(body=json.dumps(result).encode(),
+                content_type="application/json")
+
+        for path in budget.PATHS:
+            upstream.router.add_post(path, backend_handler)
+        self.backend = aiohttp.test_utils.TestServer(upstream)
+        await self.backend.start_server()
+        await super().asyncSetUp()
+
+    async def asyncTearDown(self):
+        await super().asyncTearDown()
+        await self.backend.close()
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
+
+    async def get_application(self):
+        self.db_fd, self.db_path = tempfile.mkstemp()
+        cfg = {"timeout_connect": 2, "timeout_read": 5,
+            "db": {"uri": "sqlite://%s" % self.db_path},
+            "budget": {"enabled": True}, "provenance": {"enabled": False},
+            "backends": {"public": {"url": str(self.backend.make_url("")),
+                "token": "backend-only", "model": "actual-model", "device": "test",
+                "type": "chat", "max_model_len": 1000,
+                "output_budget": dict(POLICY),
+                "reasoning": {"native_budget": True, "endpoints": ["chat"],
+                    "reserve_content_tokens": 64,
+                    "effort_budgets": {"low": 64, "high": 150},
+                    "dialect": "effort_enum"}}}}
+        app = await create_app(cfg)
+        db = await get_db(cfg["db"]["uri"])
+        await db.db.execute("INSERT INTO api_key (id,secret,type) VALUES (?,?,?)",
+            ("budget-user", hashlib.sha256(b"budget-test-token").hexdigest(), "LLM"))
+        await db.db.commit()
+        await db.close()
+        return app
+
+    async def events(self, count):
+        deadline = time.monotonic() + 5
+        while True:
+            db = await get_db(self.app["config"]["db"]["uri"])
+            cur = await db.db.execute("SELECT product,quantity,rid FROM event_oneoff")
+            rows = await cur.fetchall()
+            await db.close()
+            if len(rows) >= count or time.monotonic() >= deadline:
+                return rows
+            await asyncio.sleep(.01)
+
+    async def test_chat_dialect_injection_end_to_end(self):
+        async with self.client.post("/v1/chat/completions", headers=AUTH,
+                json={"model": "public", "max_tokens": 128}) as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+        forwarded = self.received[-1]
+        self.assertEqual(forwarded["model"], "actual-model")
+        self.assertEqual(forwarded["reasoning_effort"], "low")
+        self.assertEqual(forwarded["chat_template_kwargs"],
+            {"reasoning_effort": "low"})
+        self.assertNotIn("thinking_token_budget", forwarded)
+        self.assertEqual(data["llmproxy"]["budget"]["reasoning"],
+            {"dialect": "effort_enum", "parameter": "reasoning_effort",
+                "requested_tokens": None, "requested_effort": None,
+                "forwarded_tokens": 64, "forwarded_effort": "low",
+                "source": "proxy", "reserve_content_tokens": 64})
+        self.assertEqual(len(await self.events(2)), 2)
+
+    async def test_non_chat_protocols_carry_no_reasoning_metadata(self):
+        for path, payload in (("/v1/completions",
+                    {"model": "public", "prompt": "hi", "max_tokens": 100}),
+                ("/v1/messages", {"model": "public", "input": "hi",
+                    "max_tokens": 100}),
+                ("/v1/responses", {"model": "public", "input": "hi",
+                    "max_output_tokens": 100})):
+            with self.subTest(path=path):
+                async with self.client.post(path, headers=AUTH,
+                        json=payload) as res:
+                    self.assertEqual(res.status, 200)
+                    data = await res.json()
+                self.assertNotIn("reasoning", data["llmproxy"]["budget"])
+                self.assertNotIn("reasoning_effort", self.received[-1])
+                self.assertNotIn("chat_template_kwargs", self.received[-1])
+        self.assertEqual(len(await self.events(6)), 6)
+
+    async def test_reload_kill_switch_with_dialect_config(self):
+        cfg = copy.deepcopy(self.app["config"])
+        cfg["budget"]["enabled"] = False
+        self.app["config"]["_path"] = "unused-test-path"
+        with mock.patch("llmproxy.config.load", return_value=cfg):
+            reload_config(self.app)
+        async with self.client.post("/v1/chat/completions", headers=AUTH,
+                json={"model": "public", "max_tokens": 128}) as res:
+            self.assertEqual(res.status, 200)
+            data = await res.json()
+        self.assertNotIn("llmproxy", data)
+        self.assertNotIn("reasoning_effort", self.received[-1])
+        self.assertNotIn("chat_template_kwargs", self.received[-1])
+        self.assertNotIn("thinking_token_budget", self.received[-1])
