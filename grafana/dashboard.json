@@ -185,14 +185,40 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "sum(llmproxy_tokens_total)",
+          "expr": "sum(increase(llmproxy_tokens_total[$__rate_interval]))",
           "legendFormat": "total tokens"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "cumulativeFunctions",
+            "reduce": {"reducer": "sum"},
+            "cumulative": {"field": "total tokens", "reducer": "sum"},
+            "replaceFields": true
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short"
         }
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       }
     },
     {
