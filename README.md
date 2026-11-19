@@ -254,7 +254,9 @@ directions and adds the gateway around them:
   In session: a backend that rejects the proxy (close 1008, e.g. a wrong
   `token`) is a configuration fault — the client sees close 1011 and the
   log gets a CRITICAL naming the backend; the backend's session limit
-  (close 1013) passes through as 1013.
+  (close 1013) passes through as 1013. A key that expires mid-session ends
+  it on the next client frame with close 1008 (that frame is not forwarded;
+  segments already in flight still drain and bill).
 * **Usage metering and billing** — each
   `conversation.item.input_audio_transcription.completed` event is billed as
   its own ONEOFF event (`MODEL/DEVICE/transcription`, the same product shape
@@ -262,7 +264,9 @@ directions and adds the gateway around them:
   `usage.seconds` is counted in `llmproxy_audio_seconds_total{model}`.
   Billing per segment, not per session: an hours-long call never loses more
   than the segment that was in flight when the worker died. Audio the client
-  never committed is never billed.
+  never committed is never billed. A completed event without a finite,
+  positive `usage.seconds` is never forwarded unbilled: the session ends
+  with close 1011 and an ERROR log (as offline transcription's 502).
 * **Timeouts** — the global `timeout_read` does not bound a session (the
   backend enforces its own session/idle limits). `heartbeat` (default 30 s)
   is the WebSocket keepalive to the backend. A disconnected client gets a

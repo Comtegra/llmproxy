@@ -1,6 +1,8 @@
 """Tests for the /v1/realtime WebSocket endpoint."""
 
 import asyncio
+import datetime
+import hashlib
 import json
 import time
 import unittest
@@ -11,6 +13,7 @@ import aiohttp.test_utils
 import aiohttp.web
 
 from llmproxy import config
+from llmproxy.db import get_db
 
 from . import mockbackend
 from .test_proxy import LLMProxyAppTestCase, _parse_metrics
@@ -417,6 +420,52 @@ class TestRealtimeBilling(RealtimeTestCase):
         await ws.close()
         self.assertListEqual(await self.get_events(), [])
 
+
+    async def test_unbillable_completed_segment_ends_the_session(self):
+        for seconds in (None, 0, -1.5, float("inf"), True, "3.7"):
+            with self.subTest(seconds=seconds):
+                self.backend.app["ws_control"]["usage_seconds"] = seconds
+                ws = await self.client.ws_connect("/v1/realtime",
+                    headers=self.AUTH)
+                await ws.send_str(json.dumps(
+                    {"type": "input_audio_buffer.commit"}))
+                msg = await ws.receive()
+                self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+                self.assertEqual(msg.data, 1011)
+                await ws.close()
+        self.assertListEqual(await self.get_events(), [])
+
+
+class TestRealtimeKeyExpiry(RealtimeTestCase):
+    async def test_session_stops_forwarding_after_key_expiry(self):
+        expires = datetime.datetime.now(datetime.UTC) \
+            + datetime.timedelta(seconds=1)
+        secret = hashlib.sha256(b"shortlived").hexdigest()
+        db = await get_db(self.app["config"]["db"]["uri"])
+        await db.db.execute("INSERT INTO api_key (id, secret, type, expires) "
+            "VALUES ('shortuser', ?, 'LLM', ?)", (secret, expires))
+        await db.db.commit()
+        await db.close()
+
+        ws = await self.client.ws_connect("/v1/realtime",
+            headers={"Authorization": "Bearer shortlived"})
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        evt = json.loads((await ws.receive()).data)
+        self.assertEqual(evt["type"],
+            "conversation.item.input_audio_transcription.completed")
+
+        await asyncio.sleep(max(0.0, (expires
+            - datetime.datetime.now(datetime.UTC)).total_seconds()) + 0.2)
+        await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
+        msg = await ws.receive()
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1008)
+        await ws.close()
+
+        self.assertEqual(len(self.backend.app["ws_records"][-1]["frames"]), 1)
+        self.assertListEqual(await self.get_events(), [
+            {"product": "myrealtime/none/transcription", "quantity": 3.7},
+        ])
 
 class TestRealtimeRateLimits(RealtimeTestCase):
     async def test_concurrency_bounds_parallel_sessions(self):

@@ -16,8 +16,10 @@ was in flight when the worker died.
 """
 
 import asyncio
+import datetime
 import decimal
 import json
+import math
 import time
 
 import aiohttp
@@ -34,6 +36,7 @@ COMPLETED = "conversation.item.input_audio_transcription.completed"
 # passes through: it is the backend saying it is out of sessions.
 BACKEND_AUTH_FAILED = 1008
 SESSION_LIMIT = 1013
+KEY_EXPIRED = 1008
 INTERNAL_ERROR = 1011
 PASSTHROUGH_CLOSES = frozenset({1000, 1001, SESSION_LIMIT})
 
@@ -87,9 +90,25 @@ def _select_backend(req):
     return b_name, b_cfg
 
 
-async def _forward_up(ws_client, ws_backend):
+class UnbillableSegment(Exception):
+    pass
+
+
+def _billable_seconds(evt):
+    usage = evt.get("usage")
+    seconds = usage.get("seconds") if isinstance(usage, dict) else None
+    if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
+            or not math.isfinite(seconds) or seconds <= 0):
+        return None
+    return seconds
+
+
+async def _forward_up(ws_client, ws_backend, expires_at=None):
     """Client -> backend frames, verbatim."""
     async for msg in ws_client:
+        if (expires_at is not None
+                and datetime.datetime.now(datetime.UTC) >= expires_at):
+            return KEY_EXPIRED
         if msg.type == aiohttp.WSMsgType.TEXT:
             await ws_backend.send_str(msg.data)
         elif msg.type == aiohttp.WSMsgType.BINARY:
@@ -106,10 +125,10 @@ async def _forward_down(ws_backend, ws_client, on_completed):
         if msg.type == aiohttp.WSMsgType.TEXT:
             try:
                 evt = json.loads(msg.data)
-                if isinstance(evt, dict) and evt.get("type") == COMPLETED:
-                    await on_completed(evt)
             except ValueError:
-                pass  # not JSON: still forwarded, the pipe stays transparent
+                evt = None  # not JSON: still forwarded, the pipe stays transparent
+            if isinstance(evt, dict) and evt.get("type") == COMPLETED:
+                await on_completed(evt)
             try:
                 await ws_client.send_str(msg.data)
             except (ConnectionError, aiohttp.ClientError):
@@ -205,38 +224,49 @@ async def realtime(f_req):
                 await ws_client.prepare(f_req)
 
                 async def on_completed(evt):
-                    usage = evt.get("usage") or {}
-                    seconds = usage.get("seconds")
-                    if isinstance(seconds, (int, float)) and seconds > 0:
-                        # Bill FIRST, in the offline order (record, log,
-                        # metric): one ONEOFF event per completed segment,
-                        # the same product shape as /v1/audio/transcriptions
-                        # (Decimal keeps the fractional-seconds path
-                        # identical on Mongo).
-                        await billing.record(f_req, user, {
-                            "%s/%s/transcription" % (b_name, b_cfg["device"]):
-                                decimal.Decimal(str(seconds)),
-                        })
-                        # billing.record reuses the session's cached
-                        # connection (get_db); close_db closes it when the
-                        # session ends.
-                        app.logger.info(
-                            "Client used: %.3f s of %s (realtime)",
-                            float(seconds), b_name)
-                        # The metric is the hook's LAST side effect (as in
-                        # audio.py): "metered" always means "billed", so the
-                        # drain tests that poll this metric never race an
-                        # in-flight write against their teardown.
-                        metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(
-                            float(seconds))
+                    seconds = _billable_seconds(evt)
+                    if seconds is None:
+                        raise UnbillableSegment()
+                    # Bill FIRST, in the offline order (record, log,
+                    # metric): one ONEOFF event per completed segment,
+                    # the same product shape as /v1/audio/transcriptions
+                    # (Decimal keeps the fractional-seconds path
+                    # identical on Mongo).
+                    await billing.record(f_req, user, {
+                        "%s/%s/transcription" % (b_name, b_cfg["device"]):
+                            decimal.Decimal(str(seconds)),
+                    })
+                    # billing.record reuses the session's cached
+                    # connection (get_db); close_db closes it when the
+                    # session ends.
+                    app.logger.info(
+                        "Client used: %.3f s of %s (realtime)",
+                        float(seconds), b_name)
+                    # The metric is the hook's LAST side effect (as in
+                    # audio.py): "metered" always means "billed", so the
+                    # drain tests that poll this metric never race an
+                    # in-flight write against their teardown.
+                    metrics.AUDIO_SECONDS_TOTAL.labels(b_name).inc(
+                        float(seconds))
 
-                up = asyncio.create_task(_forward_up(ws_client, ws_backend))
+                expires_at = auth._normalize_expires(user.get("expires"))
+                if expires_at is auth._UNPARSEABLE:
+                    expires_at = None
+                up = asyncio.create_task(
+                    _forward_up(ws_client, ws_backend, expires_at))
                 down = asyncio.create_task(
                     _forward_down(ws_backend, ws_client, on_completed))
                 done, _ = await asyncio.wait({up, down},
                     return_when=asyncio.FIRST_COMPLETED)
 
-                if down in done:
+                if down in done and isinstance(down.exception(),
+                        UnbillableSegment):
+                    app.logger.error(
+                        "Realtime backend %s sent a completed segment with "
+                        "no billable usage.seconds; request_id=%s",
+                        b_name, f_req["request_id"])
+                    await ws_client.close(code=INTERNAL_ERROR)
+                elif down in done:
                     b_close = ws_backend.close_code
                     code, level = _map_close_code(b_close)
                     if level == "critical":
@@ -248,7 +278,7 @@ async def realtime(f_req):
                     elif level == "error":
                         app.logger.error(
                             "Realtime backend %s closed the session with "
-                            "code %d; request_id=%s", b_name, b_close,
+                            "code %s; request_id=%s", b_name, b_close,
                             f_req["request_id"])
                     await ws_client.close(code=code)
                 else:
@@ -256,13 +286,19 @@ async def realtime(f_req):
                     # backend's in-flight reply for the grace period (it is
                     # the only reader, so nothing is lost), THEN close the
                     # backend so it ends its session.
+                    expired = (up in done and up.exception() is None
+                        and up.result() == KEY_EXPIRED)
+                    if expired:
+                        app.logger.info("Realtime session ended: API key "
+                            "expired; request_id=%s", f_req["request_id"])
                     await asyncio.wait({down}, timeout=DRAIN_GRACE)
                     await ws_backend.close(code=ws_client.close_code or 1000)
                     # Up can also end on a BACKEND error (its send failed)
                     # with the client still connected: make sure the client
                     # gets a close frame. When the disconnect was the
                     # client's this is a no-op (aiohttp already closed it).
-                    await ws_client.close(code=INTERNAL_ERROR)
+                    await ws_client.close(
+                        code=KEY_EXPIRED if expired else INTERNAL_ERROR)
                 up.cancel()
                 try:
                     await asyncio.wait_for(
