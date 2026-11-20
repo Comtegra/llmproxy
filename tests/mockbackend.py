@@ -363,6 +363,67 @@ async def marker_claim(req):
     return aiohttp.web.json_response({"delivery_claimed": claimed})
 
 
+async def ws_realtime(req):
+    """Mock realtime STT backend: OpenAI Realtime transcription subset.
+
+    Driven by app["ws_control"]:
+      * token (default "mybackendtoken") -- mismatch sends an error event
+        and closes 1008, like the real backend
+      * reject_auth -- close 1008 unconditionally
+      * max_sessions -- close 1013 (the backend's session limit)
+      * close_code -- end the session with that code after the first frame
+      * usage_seconds (default 3.7) -- the completed event's usage.seconds
+      * echo (default True) -- non-commit frames are echoed back
+
+    Each session appends {"headers", "model", "frames"} to app["ws_records"]
+    so tests can prove what the proxy forwarded: the Authorization header
+    (the backend token, never the client's key), the ?model= param and frames.
+    """
+    control = req.app["ws_control"]
+    record = {"headers": dict(req.headers), "model": req.query.get("model"),
+        "frames": []}
+    req.app["ws_records"].append(record)
+
+    ws = aiohttp.web.WebSocketResponse()
+    await ws.prepare(req)
+
+    token = control.get("token", "mybackendtoken")
+    if control.get("reject_auth") or \
+            req.headers.get("Authorization", "") != "Bearer %s" % token:
+        await ws.send_str(json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error", "code": "invalid_api_key",
+            "message": "missing or invalid API key"}}))
+        await ws.close(code=1008)
+        return ws
+
+    if control.get("max_sessions"):
+        await ws.close(code=1013)
+        return ws
+
+    close_code = control.get("close_code")
+    async for msg in ws:
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            continue
+        record["frames"].append(msg.data)
+        try:
+            evt = json.loads(msg.data)
+        except ValueError:
+            evt = {}  # garbage in, garbage out: the pipe stays transparent
+        if evt.get("type") == "input_audio_buffer.commit":
+            await ws.send_str(json.dumps({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "seg_1", "content_index": 0,
+                "transcript": "you said something",
+                "usage": {"type": "duration",
+                    "seconds": control.get("usage_seconds", 3.7)}}))
+        elif control.get("echo", True):
+            await ws.send_str(msg.data)
+        if close_code is not None:
+            await ws.close(code=close_code)
+            return ws
+    return ws
+
+
 @aiohttp.web.middleware
 async def record_path(req, handler):
     # Lets tests prove a request the proxy rejected never reached a backend.
@@ -382,6 +443,8 @@ def create_app():
     app["marker_polls"] = []
     app["marker_claims"] = []
     app["marker_control"] = {}
+    app["ws_control"] = {}
+    app["ws_records"] = []
     app.add_routes([
         aiohttp.web.post("/v1/systemone", decision),
         aiohttp.web.get("/health", health),
@@ -391,6 +454,7 @@ def create_app():
         aiohttp.web.post("/v1/completions", chat),
         aiohttp.web.post("/v1/embeddings", embeddings),
         aiohttp.web.post("/v1/audio/transcriptions", transcriptions),
+        aiohttp.web.get("/v1/realtime", ws_realtime),
         aiohttp.web.post("/v1/messages", messages),
         aiohttp.web.post("/v1/responses", responses),
         # Path-rewritten target for /v1/files/convert (not path-preserving).
